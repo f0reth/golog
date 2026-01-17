@@ -84,15 +84,12 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	buf := buffer.New()
 	defer buf.Free()
 
-	// 時刻のフォーマット
-	timeStr := r.Time.Format(h.timeFormat)
-
 	// レベルのフォーマット（色付き）
 	levelStr := h.formatLevelWithColor(r.Level)
 
 	// fmt.Fprintf を避けて直接書き込み
 	buf.WriteByte('[')
-	buf.WriteString(timeStr)
+	*buf = r.Time.AppendFormat(*buf, h.timeFormat) // 時刻のフォーマット
 	buf.WriteString("] [")
 	buf.WriteString(levelStr)
 	buf.WriteString("] msg=")
