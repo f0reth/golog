@@ -78,15 +78,18 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "[%s] [%s] msg=", timeStr, levelStr)
-	formattedMsg, _ := formatValue(r.Message) // エラーハンドリングは別途検討
+	formattedMsg, msgErr := formatValue(r.Message)
+	if msgErr != nil {
+		formattedMsg = fmt.Sprintf("\"!ERROR:%v\"", msgErr)
+	}
 	sb.WriteString(formattedMsg)
 
 	// 属性の追加
 	for _, attr := range h.attrs {
-		appendAttr(&sb, attr.Key, attr.Value)
+		appendAttr(&sb, attr.Key, attr.Value, nil) // Handler.attrsは既にグループ化済み
 	}
 	r.Attrs(func(attr slog.Attr) bool {
-		appendAttr(&sb, attr.Key, attr.Value)
+		appendAttr(&sb, attr.Key, attr.Value, h.groups) // レコードの属性は現在のグループで囲む
 		return true
 	})
 
@@ -95,8 +98,17 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	return err
 }
 
-func appendAttr(sb *strings.Builder, key string, value slog.Value) {
+func appendAttr(sb *strings.Builder, key string, value slog.Value, groups []string) {
 	sb.WriteString(" ") // キーの前にスペース
+
+	// グループプレフィックスを付ける
+	if len(groups) > 0 {
+		for _, group := range groups {
+			sb.WriteString(group)
+			sb.WriteString(".")
+		}
+	}
+
 	sb.WriteString(key)
 	sb.WriteString("=")
 	// formatValueは slog.Value.Any() を受け取るので、value.Any() を渡す
@@ -158,12 +170,7 @@ func formatValue(v any) (string, error) {
 
 	// 構造体処理
 	rv := reflect.ValueOf(v)
-	if rv.Kind() == reflect.Struct || (rv.Kind() == reflect.Ptr && rv.Elem().Kind() == reflect.Struct) {
-		// LogFormatterインターフェースを実装しているか確認
-		if formatter, ok := v.(LogFormatter); ok {
-			return formatter.FormatForLog()
-		}
-
+	if rv.Kind() == reflect.Struct || (rv.Kind() == reflect.Pointer && rv.Elem().Kind() == reflect.Struct) {
 		// 通常の構造体をJSONに変換
 		b, err := json.Marshal(v)
 		if err != nil {
@@ -198,9 +205,22 @@ func escapeString(s string) string {
 // WithAttrs は新しい属性を持つハンドラーを返します
 func (h *Handler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	newHandler := *h // 既存のハンドラの値をコピー
-	newHandler.attrs = make([]slog.Attr, len(h.attrs)+len(attrs))
+
+	// 新しい属性にグループプレフィックスを付ける
+	prefixedAttrs := make([]slog.Attr, len(attrs))
+	for i, attr := range attrs {
+		if len(h.groups) > 0 {
+			// グループプレフィックスを属性のキーに付ける
+			prefixedKey := strings.Join(h.groups, ".") + "." + attr.Key
+			prefixedAttrs[i] = slog.Attr{Key: prefixedKey, Value: attr.Value}
+		} else {
+			prefixedAttrs[i] = attr
+		}
+	}
+
+	newHandler.attrs = make([]slog.Attr, len(h.attrs)+len(prefixedAttrs))
 	copy(newHandler.attrs, h.attrs)
-	copy(newHandler.attrs[len(h.attrs):], attrs)
+	copy(newHandler.attrs[len(h.attrs):], prefixedAttrs)
 	// groupsも同様にコピーする必要がある (元のハンドラのgroupsを変更しないため)
 	newHandler.groups = make([]string, len(h.groups))
 	copy(newHandler.groups, h.groups)
