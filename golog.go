@@ -3,7 +3,6 @@ package loggo
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log/slog"
 	"reflect"
@@ -301,6 +300,11 @@ func formatLevel(level slog.Level) string {
 	case slog.LevelError:
 		return "ERROR"
 	default:
-		return fmt.Sprintf("%5s", level.String())
+		// fmt.Sprintf を避けて strings パッケージで5文字幅に揃える
+		s := level.String()
+		if len(s) < 5 {
+			return strings.Repeat(" ", 5-len(s)) + s
+		}
+		return s
 	}
 }
