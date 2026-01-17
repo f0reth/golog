@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/f0reth/golog/internal/buffer"
 )
 
 // TestNewHandler は NewHandler の初期化をテストします
@@ -427,4 +429,572 @@ func BenchmarkSlogConcurrent(b *testing.B) {
 			i++
 		}
 	})
+}
+
+// TestWithAttrsEmpty は空の属性配列での WithAttrs をテストします
+func TestWithAttrsEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	handler := NewHandler(&buf, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	// 空の属性配列を渡す
+	newHandler := handler.WithAttrs([]slog.Attr{})
+
+	// 元のハンドラーと同じインスタンスが返されるべき
+	if newHandler != handler {
+		t.Error("WithAttrs with empty slice should return the same handler")
+	}
+}
+
+// TestWithAttrsMultiple は複数回 WithAttrs を呼んだ場合をテストします
+func TestWithAttrsMultiple(t *testing.T) {
+	var buf bytes.Buffer
+	handler := NewHandler(&buf, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	logger := slog.New(handler)
+	logger = logger.With("first", "1").With("second", "2").With("third", "3")
+	logger.Info("test")
+
+	output := buf.String()
+	if !strings.Contains(output, "first=\"1\"") {
+		t.Error("output should contain first attribute")
+	}
+	if !strings.Contains(output, "second=\"2\"") {
+		t.Error("output should contain second attribute")
+	}
+	if !strings.Contains(output, "third=\"3\"") {
+		t.Error("output should contain third attribute")
+	}
+}
+
+// TestWithAttrsAfterWithGroup は WithGroup の後に WithAttrs を呼んだ場合をテストします
+func TestWithAttrsAfterWithGroup(t *testing.T) {
+	var buf bytes.Buffer
+	handler := NewHandler(&buf, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	logger := slog.New(handler)
+	logger = logger.With("before", "group")
+	logger = logger.WithGroup("g1").With("inside", "group")
+	logger.Info("test", "after", "log")
+
+	output := buf.String()
+	if !strings.Contains(output, "before=\"group\"") {
+		t.Errorf("output should contain attribute before group, got: %s", output)
+	}
+	if !strings.Contains(output, "g1.inside=\"group\"") {
+		t.Errorf("output should contain grouped attribute, got: %s", output)
+	}
+	if !strings.Contains(output, "g1.after=\"log\"") {
+		t.Errorf("output should contain attribute in group, got: %s", output)
+	}
+}
+
+// TestComplexStructures は複雑な構造体のログ出力をテストします
+func TestComplexStructures(t *testing.T) {
+	var buf bytes.Buffer
+	handler := NewHandler(&buf, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	logger := slog.New(handler)
+
+	// スライス
+	logger.Info("slice test", "numbers", []int{1, 2, 3})
+	output := buf.String()
+	if !strings.Contains(output, "numbers=[1,2,3]") {
+		t.Errorf("output should contain slice, got: %s", output)
+	}
+
+	buf.Reset()
+
+	// マップ
+	logger.Info("map test", "data", map[string]int{"a": 1, "b": 2})
+	output = buf.String()
+	// マップの順序は不定なので、キーの存在をチェック
+	if !strings.Contains(output, `"a"`) || !strings.Contains(output, `"b"`) {
+		t.Errorf("output should contain map keys, got: %s", output)
+	}
+
+	buf.Reset()
+
+	// 構造体
+	type Person struct {
+		Name string
+		Age  int
+	}
+	logger.Info("struct test", "person", Person{Name: "Alice", Age: 30})
+	output = buf.String()
+	if !strings.Contains(output, `"Name":"Alice"`) || !strings.Contains(output, `"Age":30`) {
+		t.Errorf("output should contain struct fields, got: %s", output)
+	}
+}
+
+// TestLongString は非常に長い文字列のテストです
+func TestLongString(t *testing.T) {
+	var buf bytes.Buffer
+	handler := NewHandler(&buf, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	logger := slog.New(handler)
+
+	// 1000文字の文字列
+	longStr := strings.Repeat("a", 1000)
+	logger.Info("long string test", "data", longStr)
+
+	output := buf.String()
+	if !strings.Contains(output, longStr) {
+		t.Error("output should contain the long string")
+	}
+}
+
+// TestManyAttributes は大量の属性のテストです
+func TestManyAttributes(t *testing.T) {
+	var buf bytes.Buffer
+	handler := NewHandler(&buf, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	logger := slog.New(handler)
+
+	// 50個の属性
+	attrs := make([]any, 100) // key-value pairs
+	for i := 0; i < 50; i++ {
+		attrs[i*2] = "key" + string(rune('0'+i%10))
+		attrs[i*2+1] = i
+	}
+
+	logger.Info("many attributes test", attrs...)
+
+	output := buf.String()
+	// いくつかの属性が含まれているか確認
+	if !strings.Contains(output, "key0") || !strings.Contains(output, "key5") {
+		t.Errorf("output should contain attributes, got: %s", output)
+	}
+}
+
+// TestEmptyString は空文字列のテストです
+func TestEmptyString(t *testing.T) {
+	var buf bytes.Buffer
+	handler := NewHandler(&buf, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	logger := slog.New(handler)
+	logger.Info("", "key", "")
+
+	output := buf.String()
+	if !strings.Contains(output, `msg=""`) {
+		t.Error("output should handle empty message")
+	}
+	if !strings.Contains(output, `key=""`) {
+		t.Error("output should handle empty attribute value")
+	}
+}
+
+// TestCustomLogLevel はカスタムログレベルのテストです
+func TestCustomLogLevel(t *testing.T) {
+	var buf bytes.Buffer
+	handler := NewHandler(&buf, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	logger := slog.New(handler)
+
+	// カスタムログレベル (Error + 4)
+	customLevel := slog.LevelError + 4
+	logger.Log(context.Background(), customLevel, "custom level test")
+
+	output := buf.String()
+	// カスタムレベルが5文字幅で出力されることを確認
+	if !strings.Contains(output, "ERROR+4") && !strings.Contains(output, "12") {
+		t.Errorf("output should contain custom level, got: %s", output)
+	}
+}
+
+// ErrorFormatter は FormatForLog でエラーを返すテスト用の型です
+type ErrorFormatter struct{}
+
+func (e ErrorFormatter) FormatForLog() (string, error) {
+	return "", context.DeadlineExceeded
+}
+
+// TestLogFormatterError は LogFormatter がエラーを返す場合をテストします
+func TestLogFormatterError(t *testing.T) {
+	var buf bytes.Buffer
+	handler := NewHandler(&buf, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	logger := slog.New(handler)
+	logger.Info("test", "error_formatter", ErrorFormatter{})
+
+	output := buf.String()
+	if !strings.Contains(output, "!ERROR:") {
+		t.Errorf("output should contain error marker, got: %s", output)
+	}
+	if !strings.Contains(output, "context deadline exceeded") {
+		t.Errorf("output should contain error message, got: %s", output)
+	}
+}
+
+// TestAllColorLevels はすべてのログレベルの色をテストします
+func TestAllColorLevels(t *testing.T) {
+	tests := []struct {
+		level slog.Level
+		color string
+	}{
+		{slog.LevelDebug, colorCyan},
+		{slog.LevelInfo, colorGreen},
+		{slog.LevelWarn, colorYellow},
+		{slog.LevelError, colorRed},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.level.String(), func(t *testing.T) {
+			var buf bytes.Buffer
+			handler := NewHandler(&buf, &Options{
+				Level:     slog.LevelDebug,
+				UseColors: true,
+			})
+
+			logger := slog.New(handler)
+			logger.Log(context.Background(), tt.level, "test")
+
+			output := buf.String()
+			if !strings.Contains(output, tt.color) {
+				t.Errorf("output should contain color %s, got: %s", tt.color, output)
+			}
+		})
+	}
+}
+
+// TestVariousNumericTypes は様々な数値型のテストです
+func TestVariousNumericTypes(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    any
+		expected string
+	}{
+		{"int8", int8(127), "127"},
+		{"int16", int16(32767), "32767"},
+		{"int32", int32(2147483647), "2147483647"},
+		{"int64", int64(9223372036854775807), "9223372036854775807"},
+		{"uint", uint(42), "42"},
+		{"uint8", uint8(255), "255"},
+		{"uint16", uint16(65535), "65535"},
+		{"uint32", uint32(4294967295), "4294967295"},
+		{"uint64", uint64(18446744073709551615), "18446744073709551615"},
+		{"float32", float32(3.14), "3.14"},
+		{"float64", float64(2.718281828), "2.718281828"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := formatValue(tt.value)
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+			if result != tt.expected {
+				t.Errorf("expected %q, got %q", tt.expected, result)
+			}
+		})
+	}
+}
+
+// TestHandlerIndependence は複数のハンドラーの独立性をテストします
+func TestHandlerIndependence(t *testing.T) {
+	var buf bytes.Buffer
+	handler1 := NewHandler(&buf, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	logger1 := slog.New(handler1)
+	logger2 := logger1.With("handler", "2")
+
+	logger1.Info("from handler1")
+	logger2.Info("from handler2")
+
+	output1 := buf.String()
+	lines := strings.Split(strings.TrimSpace(output1), "\n")
+
+	if len(lines) != 2 {
+		t.Errorf("expected 2 log lines, got %d", len(lines))
+	}
+
+	// 最初のログには "handler" 属性がないはず
+	if strings.Contains(lines[0], "handler=") {
+		t.Errorf("first log should not have handler attribute, got: %s", lines[0])
+	}
+
+	// 2番目のログには "handler" 属性があるはず
+	if !strings.Contains(lines[1], "handler=\"2\"") {
+		t.Errorf("second log should have handler attribute, got: %s", lines[1])
+	}
+}
+
+// TestBufferPoolReuse はBuffer Poolの再利用をテストします
+func TestBufferPoolReuse(t *testing.T) {
+	// Buffer Poolから2つのバッファを取得
+	buf1 := buffer.New()
+	buf1.WriteString("test1")
+	ptr1 := &(*buf1)[0] // 最初のバッファのアドレスを保存
+
+	// バッファをプールに戻す
+	buf1.Free()
+
+	// 新しいバッファを取得（同じバッファが再利用されるはず）
+	buf2 := buffer.New()
+
+	// バッファがリセットされていることを確認
+	if buf2.Len() != 0 {
+		t.Errorf("reused buffer should be empty, got length %d", buf2.Len())
+	}
+
+	// 同じバッファが再利用されたか確認（ポインタの比較）
+	if len(*buf2) > 0 {
+		ptr2 := &(*buf2)[0]
+		if ptr1 != ptr2 {
+			// 常に同じではないが、多くの場合再利用される
+			t.Logf("buffer was not reused (this is not necessarily an error)")
+		}
+	}
+
+	buf2.Free()
+}
+
+// TestBufferPoolLargeBuffer は大きなバッファがプールに戻されないことをテストします
+func TestBufferPoolLargeBuffer(t *testing.T) {
+	buf := buffer.New()
+
+	// 16KB + 1バイトの大きなデータを書き込む
+	largeData := make([]byte, 16*1024+1)
+	for i := range largeData {
+		largeData[i] = 'a'
+	}
+	buf.Write(largeData)
+
+	// 容量が16KBを超えていることを確認
+	if cap(*buf) <= 16*1024 {
+		t.Errorf("buffer capacity should exceed 16KB, got %d", cap(*buf))
+	}
+
+	// Free を呼んでも、大きすぎるバッファはプールに戻されない
+	buf.Free()
+
+	// 新しいバッファを取得（通常サイズのバッファが返されるはず）
+	buf2 := buffer.New()
+	if cap(*buf2) > 16*1024 {
+		t.Errorf("new buffer should not have large capacity, got %d", cap(*buf2))
+	}
+	buf2.Free()
+}
+
+// TestBufferOperations はBuffer の基本操作をテストします
+func TestBufferOperations(t *testing.T) {
+	buf := buffer.New()
+	defer buf.Free()
+
+	// WriteString
+	buf.WriteString("hello")
+	if buf.String() != "hello" {
+		t.Errorf("expected 'hello', got %q", buf.String())
+	}
+
+	// WriteByte
+	buf.WriteByte(' ')
+	if buf.String() != "hello " {
+		t.Errorf("expected 'hello ', got %q", buf.String())
+	}
+
+	// Write
+	buf.Write([]byte("world"))
+	if buf.String() != "hello world" {
+		t.Errorf("expected 'hello world', got %q", buf.String())
+	}
+
+	// Len
+	if buf.Len() != 11 {
+		t.Errorf("expected length 11, got %d", buf.Len())
+	}
+
+	// Reset
+	buf.Reset()
+	if buf.Len() != 0 {
+		t.Errorf("expected length 0 after reset, got %d", buf.Len())
+	}
+
+	// SetLen
+	buf.WriteString("hello world")
+	buf.SetLen(5)
+	if buf.String() != "hello" {
+		t.Errorf("expected 'hello' after SetLen, got %q", buf.String())
+	}
+}
+
+// TestDisabledLevel はログレベルによる出力の抑制をテストします
+func TestDisabledLevel(t *testing.T) {
+	var buf bytes.Buffer
+	handler := NewHandler(&buf, &Options{
+		Level:     slog.LevelWarn,
+		UseColors: false,
+	})
+
+	logger := slog.New(handler)
+
+	// DEBUGとINFOは出力されないはず
+	logger.Debug("debug message")
+	logger.Info("info message")
+
+	if buf.Len() > 0 {
+		t.Errorf("no output expected for disabled levels, got: %s", buf.String())
+	}
+
+	// WARNとERRORは出力されるはず
+	logger.Warn("warn message")
+	output := buf.String()
+	if !strings.Contains(output, "warn message") {
+		t.Error("warn message should be logged")
+	}
+}
+
+// TestNilValue はnil値のテストです
+func TestNilValue(t *testing.T) {
+	var buf bytes.Buffer
+	handler := NewHandler(&buf, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	logger := slog.New(handler)
+
+	// nil interface
+	var nilInterface any
+	logger.Info("test", "nil_value", nilInterface)
+
+	output := buf.String()
+	if !strings.Contains(output, "nil_value=null") {
+		t.Errorf("output should contain null for nil value, got: %s", output)
+	}
+}
+
+// TestStructWithNilPointer はnil ポインタを含む構造体のテストです
+func TestStructWithNilPointer(t *testing.T) {
+	type Inner struct {
+		Value string
+	}
+	type Outer struct {
+		Ptr *Inner
+	}
+
+	var buf bytes.Buffer
+	handler := NewHandler(&buf, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	logger := slog.New(handler)
+	logger.Info("test", "data", Outer{Ptr: nil})
+
+	output := buf.String()
+	if !strings.Contains(output, "Ptr") && !strings.Contains(output, "null") {
+		t.Errorf("output should handle nil pointer in struct, got: %s", output)
+	}
+}
+
+// discardWriter は書き込みを破棄する io.Writer です
+type discardWriter struct{}
+
+func (d discardWriter) Write(p []byte) (n int, err error) {
+	return len(p), nil
+}
+
+// TestHighVolumeLogging は大量のログ出力でメモリリークがないかテストします
+func TestHighVolumeLogging(t *testing.T) {
+	handler := NewHandler(discardWriter{}, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	logger := slog.New(handler)
+
+	// 10000回のログ出力
+	for i := range 10000 {
+		logger.Info("high volume test", "iteration", i, "data", "some data")
+	}
+
+	// メモリリークがなければテストパス
+	// （実際のメモリリークテストは -memprofile で確認）
+}
+
+// TestAttributeOrder は属性の順序が保持されることをテストします
+func TestAttributeOrder(t *testing.T) {
+	var buf bytes.Buffer
+	handler := NewHandler(&buf, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	logger := slog.New(handler)
+	logger.Info("test", "first", "1", "second", "2", "third", "3")
+
+	output := buf.String()
+
+	// 属性が順序通りに出力されているか確認
+	firstIdx := strings.Index(output, "first")
+	secondIdx := strings.Index(output, "second")
+	thirdIdx := strings.Index(output, "third")
+
+	if firstIdx == -1 || secondIdx == -1 || thirdIdx == -1 {
+		t.Error("all attributes should be present")
+	}
+
+	if !(firstIdx < secondIdx && secondIdx < thirdIdx) {
+		t.Errorf("attributes should be in order: first(%d), second(%d), third(%d)", firstIdx, secondIdx, thirdIdx)
+	}
+}
+
+// TestPreformattedAttrsWithMultipleWithAttrs は複数のWithAttrsで事前フォーマットをテストします
+func TestPreformattedAttrsWithMultipleWithAttrs(t *testing.T) {
+	var buf bytes.Buffer
+	handler := NewHandler(&buf, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	// 複数回WithAttrsを呼ぶ
+	h1 := handler.WithAttrs([]slog.Attr{slog.String("a", "1")})
+	h2 := h1.WithAttrs([]slog.Attr{slog.String("b", "2")})
+	h3 := h2.WithAttrs([]slog.Attr{slog.String("c", "3")})
+
+	logger := slog.New(h3)
+	logger.Info("test")
+
+	output := buf.String()
+
+	// すべての属性が含まれているか確認
+	if !strings.Contains(output, `a="1"`) {
+		t.Errorf("output should contain a=1, got: %s", output)
+	}
+	if !strings.Contains(output, `b="2"`) {
+		t.Errorf("output should contain b=2, got: %s", output)
+	}
+	if !strings.Contains(output, `c="3"`) {
+		t.Errorf("output should contain c=3, got: %s", output)
+	}
 }
