@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // ANSIカラーコード
@@ -28,7 +29,8 @@ type Handler struct {
 	timeFormat string
 	attrs      []slog.Attr
 	groups     []string
-	useColors  bool // 色を使用するかどうかのフラグ
+	useColors  bool        // 色を使用するかどうかのフラグ
+	mu         *sync.Mutex // スレッドセーフな書き込みのためのミューテックス
 }
 
 // Options はカスタムハンドラーのオプション
@@ -56,6 +58,7 @@ func NewHandler(w io.Writer, opts *Options) *Handler {
 		attrs:      []slog.Attr{},
 		groups:     []string{},
 		useColors:  useColors,
+		mu:         &sync.Mutex{},
 	}
 }
 
@@ -106,7 +109,11 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	})
 
 	sb.WriteByte('\n')
+
+	// スレッドセーフな書き込みのためにロックを取得
+	h.mu.Lock()
 	_, err := h.out.Write([]byte(sb.String()))
+	h.mu.Unlock()
 	return err
 }
 
@@ -168,19 +175,10 @@ func formatValue(v any) (string, error) {
 		return "null", nil
 	}
 
-	// 文字列の場合は引用符で囲む
+	// 文字列の場合は strconv.Quote を使用して安全にエスケープ
+	// すべてのASCII制御文字や特殊文字を適切に処理
 	if s, ok := v.(string); ok {
-		// エスケープが必要かチェック
-		if needsEscape(s) {
-			var sb strings.Builder
-			sb.Grow(len(s) + 16) // 余裕を持って確保
-			sb.WriteByte('"')
-			writeEscapedString(&sb, s)
-			sb.WriteByte('"')
-			return sb.String(), nil
-		}
-		// エスケープ不要な場合は直接結合
-		return `"` + s + `"`, nil
+		return strconv.Quote(s), nil
 	}
 
 	// 数値、真偽値の場合は strconv を使用（fmt.Sprintf より高速）
@@ -247,49 +245,6 @@ func formatValue(v any) (string, error) {
 // LogFormatter はログ出力のためのカスタムフォーマットを提供するインターフェース
 type LogFormatter interface {
 	FormatForLog() (string, error)
-}
-
-// needsEscape は文字列にエスケープが必要な文字が含まれているかチェックします
-func needsEscape(s string) bool {
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c == '\\' || c == '"' || c == '\n' || c == '\r' || c == '\t' {
-			return true
-		}
-	}
-	return false
-}
-
-// writeEscapedString は文字列をエスケープして strings.Builder に書き込みます
-func writeEscapedString(sb *strings.Builder, s string) {
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch c {
-		case '\\':
-			sb.WriteString("\\\\")
-		case '"':
-			sb.WriteString("\\\"")
-		case '\n':
-			sb.WriteString("\\n")
-		case '\r':
-			sb.WriteString("\\r")
-		case '\t':
-			sb.WriteString("\\t")
-		default:
-			sb.WriteByte(c)
-		}
-	}
-}
-
-// escapeString は文字列内の特殊文字をエスケープします（後方互換性のため残す）
-func escapeString(s string) string {
-	if !needsEscape(s) {
-		return s
-	}
-	var sb strings.Builder
-	sb.Grow(len(s) + 8)
-	writeEscapedString(&sb, s)
-	return sb.String()
 }
 
 // WithAttrs は新しい属性を持つハンドラーを返します

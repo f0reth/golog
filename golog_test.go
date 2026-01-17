@@ -224,6 +224,16 @@ func TestFormatValue(t *testing.T) {
 		{"bool", true, "true", false},
 		{"escaped string", `hello"world`, `"hello\"world"`, false},
 		{"newline", "line1\nline2", `"line1\nline2"`, false},
+		{"tab", "hello\tworld", `"hello\tworld"`, false},
+		{"carriage return", "hello\rworld", `"hello\rworld"`, false},
+		{"backslash", `hello\world`, `"hello\\world"`, false},
+		// ASCII制御文字のテスト
+		{"null byte", "hello\x00world", `"hello\x00world"`, false},
+		{"bell", "hello\x07world", `"hello\aworld"`, false},
+		{"backspace", "hello\x08world", `"hello\bworld"`, false},
+		{"form feed", "hello\x0cworld", `"hello\fworld"`, false},
+		{"vertical tab", "hello\x0bworld", `"hello\vworld"`, false},
+		{"control chars", "\x01\x02\x03", `"\x01\x02\x03"`, false},
 	}
 
 	for _, tt := range tests {
@@ -297,31 +307,6 @@ func TestLogFormatter(t *testing.T) {
 	}
 }
 
-// TestEscapeString は escapeString 関数をテストします
-func TestEscapeString(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{`hello`, `hello`},
-		{`hello"world`, `hello\"world`},
-		{"hello\nworld", `hello\nworld`},
-		{"hello\tworld", `hello\tworld`},
-		{"hello\rworld", `hello\rworld`},
-		{`hello\world`, `hello\\world`},
-		{`"quotes"`, `\"quotes\"`},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			result := escapeString(tt.input)
-			if result != tt.expected {
-				t.Errorf("expected %q, got %q", tt.expected, result)
-			}
-		})
-	}
-}
-
 // TestTimeFormat は時刻フォーマットをテストします
 func TestTimeFormat(t *testing.T) {
 	var buf bytes.Buffer
@@ -341,6 +326,39 @@ func TestTimeFormat(t *testing.T) {
 	}
 }
 
+// TestConcurrentWrites は並行書き込みのテストです
+func TestConcurrentWrites(t *testing.T) {
+	var buf bytes.Buffer
+	handler := NewHandler(&buf, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	logger := slog.New(handler)
+
+	const goroutines = 100
+	const iterations = 10
+
+	done := make(chan bool, goroutines)
+
+	for g := range goroutines {
+		go func(id int) {
+			for i := range iterations {
+				logger.Info("concurrent test", "goroutine", id, "iteration", i)
+			}
+			done <- true
+		}(g)
+	}
+
+	// すべてのゴルーチンが完了するまで待つ
+	for range goroutines {
+		<-done
+	}
+
+	// レースコンディションが無ければテスト成功
+	// （-race フラグでテストすることでレースコンディションを検出可能）
+}
+
 // BenchmarkHandle はログ出力のベンチマークです
 func BenchmarkHandle(b *testing.B) {
 	var buf bytes.Buffer
@@ -355,4 +373,58 @@ func BenchmarkHandle(b *testing.B) {
 		logger.Info("benchmark test", "iteration", i, "data", "some data")
 		buf.Reset()
 	}
+}
+
+// BenchmarkHandleConcurrent は並行ログ出力のベンチマークです
+func BenchmarkHandleConcurrent(b *testing.B) {
+	var buf bytes.Buffer
+	handler := NewHandler(&buf, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	logger := slog.New(handler)
+
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			logger.Info("benchmark test", "iteration", i, "data", "some data")
+			i++
+		}
+	})
+}
+
+// 標準パッケージのslogのベンチマーク
+func BenchmarkSlog(b *testing.B) {
+	var buf bytes.Buffer
+	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{
+		Level:     slog.LevelInfo,
+		AddSource: false,
+	})
+
+	logger := slog.New(handler)
+
+	for i := 0; b.Loop(); i++ {
+		logger.Info("benchmark test", "iteration", i, "data", "some data")
+		buf.Reset()
+	}
+}
+
+// 標準パッケージのslogの並行ログ出力のベンチマーク
+func BenchmarkSlogConcurrent(b *testing.B) {
+	var buf bytes.Buffer
+	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{
+		Level:     slog.LevelInfo,
+		AddSource: false,
+	})
+
+	logger := slog.New(handler)
+
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			logger.Info("benchmark test", "iteration", i, "data", "some data")
+			i++
+		}
+	})
 }
