@@ -239,6 +239,37 @@ func TestFormatValue(t *testing.T) {
 	}
 }
 
+// TestNilPointer は nil ポインタの処理をテストします
+func TestNilPointer(t *testing.T) {
+	type TestStruct struct {
+		Value string
+	}
+
+	var nilPtr *TestStruct
+	result, err := formatValue(nilPtr)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if result != "null" {
+		t.Errorf("expected \"null\", got %q", result)
+	}
+
+	// ログ出力でもテスト
+	var buf bytes.Buffer
+	handler := NewHandler(&buf, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	logger := slog.New(handler)
+	logger.Info("test", "ptr", nilPtr)
+
+	output := buf.String()
+	if !strings.Contains(output, "ptr=null") {
+		t.Errorf("expected output to contain ptr=null, got: %s", output)
+	}
+}
+
 // CustomType は LogFormatter を実装するテスト用の型です
 type CustomType struct {
 	Value string

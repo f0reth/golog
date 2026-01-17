@@ -16,7 +16,6 @@ const (
 	colorRed    = "\033[31m"
 	colorGreen  = "\033[32m"
 	colorYellow = "\033[33m"
-	colorBlue   = "\033[34m"
 	colorCyan   = "\033[36m"
 	colorWhite  = "\033[37m"
 )
@@ -170,7 +169,16 @@ func formatValue(v any) (string, error) {
 
 	// 構造体処理
 	rv := reflect.ValueOf(v)
-	if rv.Kind() == reflect.Struct || (rv.Kind() == reflect.Pointer && rv.Elem().Kind() == reflect.Struct) {
+
+	// ポインタの場合はnilチェックして実体を取得
+	if rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return "null", nil
+		}
+		rv = rv.Elem()
+	}
+
+	if rv.Kind() == reflect.Struct {
 		// 通常の構造体をJSONに変換
 		b, err := json.Marshal(v)
 		if err != nil {
@@ -192,14 +200,18 @@ type LogFormatter interface {
 	FormatForLog() (string, error)
 }
 
+// stringEscaper は文字列のエスケープを効率的に行うためのReplacer
+var stringEscaper = strings.NewReplacer(
+	"\\", "\\\\",
+	"\"", "\\\"",
+	"\n", "\\n",
+	"\r", "\\r",
+	"\t", "\\t",
+)
+
 // escapeString は文字列内の特殊文字をエスケープします
 func escapeString(s string) string {
-	s = strings.ReplaceAll(s, "\\", "\\\\")
-	s = strings.ReplaceAll(s, "\"", "\\\"")
-	s = strings.ReplaceAll(s, "\n", "\\n")
-	s = strings.ReplaceAll(s, "\r", "\\r")
-	s = strings.ReplaceAll(s, "\t", "\\t")
-	return s
+	return stringEscaper.Replace(s)
 }
 
 // WithAttrs は新しい属性を持つハンドラーを返します
