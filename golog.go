@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"reflect"
+	"strconv"
 	"strings"
 )
 
@@ -75,13 +76,25 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	// レベルのフォーマット（色付き）
 	levelStr := h.formatLevelWithColor(r.Level)
 
+	// 初期容量を確保（タイムスタンプ + レベル + メッセージ + 属性用の概算）
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "[%s] [%s] msg=", timeStr, levelStr)
+	sb.Grow(128)
+
+	// fmt.Fprintf を避けて直接書き込み
+	sb.WriteByte('[')
+	sb.WriteString(timeStr)
+	sb.WriteString("] [")
+	sb.WriteString(levelStr)
+	sb.WriteString("] msg=")
+
 	formattedMsg, msgErr := formatValue(r.Message)
 	if msgErr != nil {
-		formattedMsg = fmt.Sprintf("\"!ERROR:%v\"", msgErr)
+		sb.WriteString("\"!ERROR:")
+		sb.WriteString(msgErr.Error())
+		sb.WriteByte('"')
+	} else {
+		sb.WriteString(formattedMsg)
 	}
-	sb.WriteString(formattedMsg)
 
 	// 属性の追加
 	for _, attr := range h.attrs {
@@ -92,29 +105,31 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 		return true
 	})
 
-	sb.WriteString("\n")
-	_, err := fmt.Fprint(h.out, sb.String())
+	sb.WriteByte('\n')
+	_, err := h.out.Write([]byte(sb.String()))
 	return err
 }
 
 func appendAttr(sb *strings.Builder, key string, value slog.Value, groups []string) {
-	sb.WriteString(" ") // キーの前にスペース
+	sb.WriteByte(' ') // キーの前にスペース
 
 	// グループプレフィックスを付ける
 	if len(groups) > 0 {
 		for _, group := range groups {
 			sb.WriteString(group)
-			sb.WriteString(".")
+			sb.WriteByte('.')
 		}
 	}
 
 	sb.WriteString(key)
-	sb.WriteString("=")
+	sb.WriteByte('=')
 	// formatValueは slog.Value.Any() を受け取るので、value.Any() を渡す
 	jsonStr, err := formatValue(value.Any())
 	if err != nil {
-		// slog.TextHandlerに倣ったエラー表示
-		fmt.Fprintf(sb, "\"!ERROR:%v\"", err)
+		// slog.TextHandlerに倣ったエラー表示（fmt.Fprintf を避ける）
+		sb.WriteString("\"!ERROR:")
+		sb.WriteString(err.Error())
+		sb.WriteByte('"')
 		return
 	}
 	sb.WriteString(jsonStr)
@@ -128,7 +143,7 @@ func (h *Handler) formatLevelWithColor(level slog.Level) string {
 		return levelStr
 	}
 
-	// レベルに応じた色を適用
+	// レベルに応じた色を適用（fmt.Sprintf を避けて直接結合）
 	var colorCode string
 	switch level {
 	case slog.LevelDebug:
@@ -143,7 +158,7 @@ func (h *Handler) formatLevelWithColor(level slog.Level) string {
 		colorCode = colorWhite
 	}
 
-	return fmt.Sprintf("%s%s%s", colorCode, levelStr, colorReset)
+	return colorCode + levelStr + colorReset
 }
 
 // formatValue は値を適切な形式に変換します
@@ -155,13 +170,47 @@ func formatValue(v any) (string, error) {
 
 	// 文字列の場合は引用符で囲む
 	if s, ok := v.(string); ok {
-		return fmt.Sprintf("\"%s\"", escapeString(s)), nil
+		// エスケープが必要かチェック
+		if needsEscape(s) {
+			var sb strings.Builder
+			sb.Grow(len(s) + 16) // 余裕を持って確保
+			sb.WriteByte('"')
+			writeEscapedString(&sb, s)
+			sb.WriteByte('"')
+			return sb.String(), nil
+		}
+		// エスケープ不要な場合は直接結合
+		return `"` + s + `"`, nil
 	}
 
-	// 数値、真偽値の場合はそのまま文字列化
+	// 数値、真偽値の場合は strconv を使用（fmt.Sprintf より高速）
 	switch v := v.(type) {
-	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, bool:
-		return fmt.Sprintf("%v", v), nil
+	case int:
+		return strconv.FormatInt(int64(v), 10), nil
+	case int8:
+		return strconv.FormatInt(int64(v), 10), nil
+	case int16:
+		return strconv.FormatInt(int64(v), 10), nil
+	case int32:
+		return strconv.FormatInt(int64(v), 10), nil
+	case int64:
+		return strconv.FormatInt(v, 10), nil
+	case uint:
+		return strconv.FormatUint(uint64(v), 10), nil
+	case uint8:
+		return strconv.FormatUint(uint64(v), 10), nil
+	case uint16:
+		return strconv.FormatUint(uint64(v), 10), nil
+	case uint32:
+		return strconv.FormatUint(uint64(v), 10), nil
+	case uint64:
+		return strconv.FormatUint(v, 10), nil
+	case float32:
+		return strconv.FormatFloat(float64(v), 'f', -1, 32), nil
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64), nil
+	case bool:
+		return strconv.FormatBool(v), nil
 	case LogFormatter:
 		// LogFormatterインターフェースを実装している場合は、そのメソッドを呼び出す
 		return v.FormatForLog()
@@ -200,18 +249,47 @@ type LogFormatter interface {
 	FormatForLog() (string, error)
 }
 
-// stringEscaper は文字列のエスケープを効率的に行うためのReplacer
-var stringEscaper = strings.NewReplacer(
-	"\\", "\\\\",
-	"\"", "\\\"",
-	"\n", "\\n",
-	"\r", "\\r",
-	"\t", "\\t",
-)
+// needsEscape は文字列にエスケープが必要な文字が含まれているかチェックします
+func needsEscape(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\\' || c == '"' || c == '\n' || c == '\r' || c == '\t' {
+			return true
+		}
+	}
+	return false
+}
 
-// escapeString は文字列内の特殊文字をエスケープします
+// writeEscapedString は文字列をエスケープして strings.Builder に書き込みます
+func writeEscapedString(sb *strings.Builder, s string) {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '\\':
+			sb.WriteString("\\\\")
+		case '"':
+			sb.WriteString("\\\"")
+		case '\n':
+			sb.WriteString("\\n")
+		case '\r':
+			sb.WriteString("\\r")
+		case '\t':
+			sb.WriteString("\\t")
+		default:
+			sb.WriteByte(c)
+		}
+	}
+}
+
+// escapeString は文字列内の特殊文字をエスケープします（後方互換性のため残す）
 func escapeString(s string) string {
-	return stringEscaper.Replace(s)
+	if !needsEscape(s) {
+		return s
+	}
+	var sb strings.Builder
+	sb.Grow(len(s) + 8)
+	writeEscapedString(&sb, s)
+	return sb.String()
 }
 
 // WithAttrs は新しい属性を持つハンドラーを返します
