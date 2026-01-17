@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -306,6 +307,146 @@ func TestLogFormatter(t *testing.T) {
 	output := buf.String()
 	if !strings.Contains(output, `custom="custom:test"`) {
 		t.Errorf("output should use LogFormatter, got: %s", output)
+	}
+}
+
+// UserID は slog.LogValuer を実装するテスト用の型です
+type UserID int
+
+func (u UserID) LogValue() slog.Value {
+	return slog.StringValue("user_" + strconv.Itoa(int(u)))
+}
+
+// SensitiveData は機密情報をマスクするテスト用の型です
+type SensitiveData struct {
+	Secret string
+}
+
+func (s SensitiveData) LogValue() slog.Value {
+	return slog.StringValue("[REDACTED]")
+}
+
+// NestedLogValuer は別の LogValuer を返すテスト用の型です
+type NestedLogValuer struct {
+	ID UserID
+}
+
+func (n NestedLogValuer) LogValue() slog.Value {
+	return slog.AnyValue(n.ID)
+}
+
+// IntLogValuer は整数を文字列として返すテスト用の型です
+type IntLogValuer int
+
+func (i IntLogValuer) LogValue() slog.Value {
+	return slog.IntValue(int(i) * 10)
+}
+
+// TestLogValuer は slog.LogValuer インターフェースをテストします
+func TestLogValuer(t *testing.T) {
+	t.Run("basic LogValuer", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test", "user_id", UserID(12345))
+
+		output := buf.String()
+		if !strings.Contains(output, `user_id="user_12345"`) {
+			t.Errorf("output should use LogValuer, got: %s", output)
+		}
+	})
+
+	t.Run("sensitive data masking", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test", "password", SensitiveData{Secret: "secret123"})
+
+		output := buf.String()
+		if !strings.Contains(output, `password="[REDACTED]"`) {
+			t.Errorf("output should mask sensitive data, got: %s", output)
+		}
+		if strings.Contains(output, "secret123") {
+			t.Error("output should not contain secret value")
+		}
+	})
+
+	t.Run("nested LogValuer", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test", "nested", NestedLogValuer{ID: UserID(999)})
+
+		output := buf.String()
+		if !strings.Contains(output, `nested="user_999"`) {
+			t.Errorf("output should resolve nested LogValuer, got: %s", output)
+		}
+	})
+
+	t.Run("LogValuer returning int", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+		})
+
+		logger := slog.New(handler)
+		// IntLogValuer(5) -> 50 に変換される
+		logger.Info("test", "multiplied", IntLogValuer(5))
+
+		output := buf.String()
+		if !strings.Contains(output, "multiplied=50") {
+			t.Errorf("output should contain multiplied=50, got: %s", output)
+		}
+	})
+}
+
+// DualFormatter は LogValuer と LogFormatter の両方を実装する型です
+type DualFormatter struct {
+	Value string
+}
+
+// LogValue は slog.LogValuer インターフェースを実装します
+// LogValuer は LogFormatter より優先される
+func (d DualFormatter) LogValue() slog.Value {
+	return slog.StringValue("logvaluer:" + d.Value)
+}
+
+// FormatForLog は LogFormatter インターフェースを実装します
+func (d DualFormatter) FormatForLog() (string, error) {
+	return `"formatter:` + d.Value + `"`, nil
+}
+
+// TestLogValuerWithFormatter は LogValuer と LogFormatter の優先順位をテストします
+func TestLogValuerWithFormatter(t *testing.T) {
+	var buf bytes.Buffer
+	handler := NewHandler(&buf, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	logger := slog.New(handler)
+	logger.Info("test", "dual", DualFormatter{Value: "test"})
+
+	output := buf.String()
+	// LogValuer が優先されるべき
+	if !strings.Contains(output, `dual="logvaluer:test"`) {
+		t.Errorf("LogValuer should take precedence, got: %s", output)
+	}
+	if strings.Contains(output, "formatter:test") {
+		t.Error("LogFormatter should not be used when LogValuer is present")
 	}
 }
 

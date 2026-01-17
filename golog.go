@@ -184,6 +184,14 @@ func formatValue(v any) (string, error) {
 		return "null", nil
 	}
 
+	// slog.LogValuer インターフェースのチェック（標準ライブラリのサポート）
+	if lv, ok := v.(slog.LogValuer); ok {
+		// LogValue() を呼び出して slog.Value を取得
+		value := lv.LogValue()
+		// slog.Value.Any() で実際の値を取得して再帰的に処理
+		return formatValue(value.Any())
+	}
+
 	// 文字列の場合は strconv.Quote を使用して安全にエスケープ
 	// すべてのASCII制御文字や特殊文字を適切に処理
 	if s, ok := v.(string); ok {
