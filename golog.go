@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/f0reth/golog/internal/buffer"
 )
 
 // ANSIカラーコード
@@ -23,13 +25,14 @@ const (
 
 // Handler は指定されたフォーマットでログを出力するハンドラー
 type Handler struct {
-	out        io.Writer
-	minLevel   slog.Level
-	timeFormat string
-	attrs      []slog.Attr
-	groups     []string
-	useColors  bool        // 色を使用するかどうかのフラグ
-	mu         *sync.Mutex // スレッドセーフな書き込みのためのミューテックス
+	out               io.Writer
+	minLevel          slog.Level
+	timeFormat        string
+	attrs             []slog.Attr
+	groups            []string
+	useColors         bool        // 色を使用するかどうかのフラグ
+	mu                *sync.Mutex // スレッドセーフな書き込みのためのミューテックス
+	preformattedAttrs []byte      // 事前フォーマット済みの属性（パフォーマンス最適化）
 }
 
 // Options はカスタムハンドラーのオプション
@@ -72,73 +75,75 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 		return nil
 	}
 
+	// Buffer Pool からバッファを取得
+	buf := buffer.New()
+	defer buf.Free()
+
 	// 時刻のフォーマット
 	timeStr := r.Time.Format(h.timeFormat)
 
 	// レベルのフォーマット（色付き）
 	levelStr := h.formatLevelWithColor(r.Level)
 
-	// 初期容量を確保（タイムスタンプ + レベル + メッセージ + 属性用の概算）
-	var sb strings.Builder
-	sb.Grow(128)
-
 	// fmt.Fprintf を避けて直接書き込み
-	sb.WriteByte('[')
-	sb.WriteString(timeStr)
-	sb.WriteString("] [")
-	sb.WriteString(levelStr)
-	sb.WriteString("] msg=")
+	buf.WriteByte('[')
+	buf.WriteString(timeStr)
+	buf.WriteString("] [")
+	buf.WriteString(levelStr)
+	buf.WriteString("] msg=")
 
 	formattedMsg, msgErr := formatValue(r.Message)
 	if msgErr != nil {
-		sb.WriteString("\"!ERROR:")
-		sb.WriteString(msgErr.Error())
-		sb.WriteByte('"')
+		buf.WriteString("\"!ERROR:")
+		buf.WriteString(msgErr.Error())
+		buf.WriteByte('"')
 	} else {
-		sb.WriteString(formattedMsg)
+		buf.WriteString(formattedMsg)
 	}
 
-	// 属性の追加
-	for _, attr := range h.attrs {
-		appendAttr(&sb, attr.Key, attr.Value, nil) // Handler.attrsは既にグループ化済み
+	// 事前フォーマット済みの属性を追加
+	if len(h.preformattedAttrs) > 0 {
+		buf.Write(h.preformattedAttrs)
 	}
+
+	// レコードの属性を追加
 	r.Attrs(func(attr slog.Attr) bool {
-		appendAttr(&sb, attr.Key, attr.Value, h.groups) // レコードの属性は現在のグループで囲む
+		appendAttr(buf, attr.Key, attr.Value, h.groups) // レコードの属性は現在のグループで囲む
 		return true
 	})
 
-	sb.WriteByte('\n')
+	buf.WriteByte('\n')
 
 	// スレッドセーフな書き込みのためにロックを取得
 	h.mu.Lock()
-	_, err := h.out.Write([]byte(sb.String()))
+	_, err := h.out.Write(*buf)
 	h.mu.Unlock()
 	return err
 }
 
-func appendAttr(sb *strings.Builder, key string, value slog.Value, groups []string) {
-	sb.WriteByte(' ') // キーの前にスペース
+func appendAttr(buf *buffer.Buffer, key string, value slog.Value, groups []string) {
+	buf.WriteByte(' ') // キーの前にスペース
 
 	// グループプレフィックスを付ける
 	if len(groups) > 0 {
 		for _, group := range groups {
-			sb.WriteString(group)
-			sb.WriteByte('.')
+			buf.WriteString(group)
+			buf.WriteByte('.')
 		}
 	}
 
-	sb.WriteString(key)
-	sb.WriteByte('=')
+	buf.WriteString(key)
+	buf.WriteByte('=')
 	// formatValueは slog.Value.Any() を受け取るので、value.Any() を渡す
 	jsonStr, err := formatValue(value.Any())
 	if err != nil {
 		// slog.TextHandlerに倣ったエラー表示（fmt.Fprintf を避ける）
-		sb.WriteString("\"!ERROR:")
-		sb.WriteString(err.Error())
-		sb.WriteByte('"')
+		buf.WriteString("\"!ERROR:")
+		buf.WriteString(err.Error())
+		buf.WriteByte('"')
 		return
 	}
-	sb.WriteString(jsonStr)
+	buf.WriteString(jsonStr)
 }
 
 // formatLevelWithColor はログレベルを色付きでフォーマットします
@@ -248,43 +253,59 @@ type LogFormatter interface {
 
 // WithAttrs は新しい属性を持つハンドラーを返します
 func (h *Handler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	newHandler := *h // 既存のハンドラの値をコピー
-
-	// 新しい属性にグループプレフィックスを付ける
-	prefixedAttrs := make([]slog.Attr, len(attrs))
-	for i, attr := range attrs {
-		if len(h.groups) > 0 {
-			// グループプレフィックスを属性のキーに付ける
-			prefixedKey := strings.Join(h.groups, ".") + "." + attr.Key
-			prefixedAttrs[i] = slog.Attr{Key: prefixedKey, Value: attr.Value}
-		} else {
-			prefixedAttrs[i] = attr
-		}
+	if len(attrs) == 0 {
+		return h
 	}
 
-	newHandler.attrs = make([]slog.Attr, len(h.attrs)+len(prefixedAttrs))
-	copy(newHandler.attrs, h.attrs)
-	copy(newHandler.attrs[len(h.attrs):], prefixedAttrs)
-	// groupsも同様にコピーする必要がある (元のハンドラのgroupsを変更しないため)
+	newHandler := *h // 既存のハンドラの値をコピー
+
+	// groupsをコピー
 	newHandler.groups = make([]string, len(h.groups))
 	copy(newHandler.groups, h.groups)
-	// 新しいミューテックスを作成（ミューテックスの共有を防ぐ）
-	newHandler.mu = &sync.Mutex{}
+
+	// 属性を事前にフォーマット（パフォーマンス最適化）
+	buf := buffer.New()
+	defer buf.Free()
+
+	// 既存の事前フォーマット済み属性をコピー
+	if len(h.preformattedAttrs) > 0 {
+		buf.Write(h.preformattedAttrs)
+	}
+
+	// 新しい属性をフォーマットして追加
+	for _, attr := range attrs {
+		appendAttr(buf, attr.Key, attr.Value, h.groups)
+	}
+
+	// 事前フォーマット済み属性として保存
+	newHandler.preformattedAttrs = make([]byte, buf.Len())
+	copy(newHandler.preformattedAttrs, *buf)
+
+	// attrsフィールドは互換性のために保持（現在は使用されていない）
+	newHandler.attrs = nil
+
+	// ミューテックスは共有する（標準ライブラリと同じ戦略）
+	// newHandler.mu = h.mu (構造体のコピーで既に共有されている)
 	return &newHandler
 }
 
 // WithGroup は新しいグループを持つハンドラーを返します
 func (h *Handler) WithGroup(name string) slog.Handler {
 	newHandler := *h // 既存のハンドラの値をコピー
-	// attrsをコピー
-	newHandler.attrs = make([]slog.Attr, len(h.attrs))
-	copy(newHandler.attrs, h.attrs)
+
+	// preformattedAttrs をコピー
+	if len(h.preformattedAttrs) > 0 {
+		newHandler.preformattedAttrs = make([]byte, len(h.preformattedAttrs))
+		copy(newHandler.preformattedAttrs, h.preformattedAttrs)
+	}
+
 	// groupsをコピーして追加
 	newHandler.groups = make([]string, len(h.groups)+1)
 	copy(newHandler.groups, h.groups)
 	newHandler.groups[len(h.groups)] = name
-	// 新しいミューテックスを作成（ミューテックスの共有を防ぐ）
-	newHandler.mu = &sync.Mutex{}
+
+	// ミューテックスは共有する（標準ライブラリと同じ戦略）
+	// newHandler.mu = h.mu (構造体のコピーで既に共有されている)
 	return &newHandler
 }
 
