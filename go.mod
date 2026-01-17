@@ -1,3 +1,3 @@
-module github.com/daichi2mori/loggo
+module github.com/f0reth/golog
 
 go 1.24.3
