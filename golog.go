@@ -37,26 +37,31 @@ type Handler struct {
 
 // Options はカスタムハンドラーのオプション
 type Options struct {
-	Level     slog.Leveler
-	UseColors bool
+	Level      slog.Leveler
+	UseColors  bool
+	TimeFormat string // 時刻フォーマット（空の場合は "2006-01-02 15:04:05.000" を使用）
 }
 
 // NewHandler は新しいカスタムハンドラーを作成します
 func NewHandler(w io.Writer, opts *Options) *Handler {
 	var level slog.Level
 	useColors := false
+	timeFormat := "2006-01-02 15:04:05.000" // デフォルト: ミリ秒までのフォーマット
 
 	if opts != nil {
 		if opts.Level != nil {
 			level = opts.Level.Level()
 		}
 		useColors = opts.UseColors
+		if opts.TimeFormat != "" {
+			timeFormat = opts.TimeFormat
+		}
 	}
 
 	return &Handler{
 		out:        w,
 		minLevel:   level,
-		timeFormat: "2006-01-02 15:04:05.000", // ミリ秒までのフォーマット
+		timeFormat: timeFormat,
 		attrs:      []slog.Attr{},
 		groups:     []string{},
 		useColors:  useColors,

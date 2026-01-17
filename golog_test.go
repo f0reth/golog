@@ -328,6 +328,107 @@ func TestTimeFormat(t *testing.T) {
 	}
 }
 
+// TestCustomTimeFormat はカスタム時刻フォーマットをテストします
+func TestCustomTimeFormat(t *testing.T) {
+	tests := []struct {
+		name       string
+		format     string
+		expected   string
+		timeToTest time.Time
+	}{
+		{
+			name:       "RFC3339",
+			format:     time.RFC3339,
+			expected:   "2024-01-15T10:30:45Z",
+			timeToTest: time.Date(2024, 1, 15, 10, 30, 45, 0, time.UTC),
+		},
+		{
+			name:       "only date",
+			format:     "2006-01-02",
+			expected:   "2024-01-15",
+			timeToTest: time.Date(2024, 1, 15, 10, 30, 45, 0, time.UTC),
+		},
+		{
+			name:       "only time",
+			format:     "15:04:05",
+			expected:   "10:30:45",
+			timeToTest: time.Date(2024, 1, 15, 10, 30, 45, 0, time.UTC),
+		},
+		{
+			name:       "Unix timestamp",
+			format:     time.UnixDate,
+			expected:   "Mon Jan 15 10:30:45 UTC 2024",
+			timeToTest: time.Date(2024, 1, 15, 10, 30, 45, 0, time.UTC),
+		},
+		{
+			name:       "custom format",
+			format:     "2006/01/02 15:04:05",
+			expected:   "2024/01/15 10:30:45",
+			timeToTest: time.Date(2024, 1, 15, 10, 30, 45, 0, time.UTC),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			handler := NewHandler(&buf, &Options{
+				Level:      slog.LevelInfo,
+				UseColors:  false,
+				TimeFormat: tt.format,
+			})
+
+			ctx := context.Background()
+			record := slog.NewRecord(tt.timeToTest, slog.LevelInfo, "test", 0)
+			handler.Handle(ctx, record)
+
+			output := buf.String()
+			if !strings.Contains(output, tt.expected) {
+				t.Errorf("expected output to contain %q, got: %s", tt.expected, output)
+			}
+		})
+	}
+}
+
+// TestDefaultTimeFormat はデフォルトの時刻フォーマットをテストします
+func TestDefaultTimeFormat(t *testing.T) {
+	var buf bytes.Buffer
+	// TimeFormatを指定しない（デフォルトを使用）
+	handler := NewHandler(&buf, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	ctx := context.Background()
+	record := slog.NewRecord(time.Date(2024, 1, 15, 10, 30, 45, 123456789, time.UTC), slog.LevelInfo, "test", 0)
+	handler.Handle(ctx, record)
+
+	output := buf.String()
+	// デフォルトのミリ秒までのフォーマットを確認
+	if !strings.Contains(output, "2024-01-15 10:30:45.123") {
+		t.Errorf("expected default time format with milliseconds, got: %s", output)
+	}
+}
+
+// TestEmptyTimeFormat は空文字列のTimeFormatでデフォルトが使用されることをテストします
+func TestEmptyTimeFormat(t *testing.T) {
+	var buf bytes.Buffer
+	handler := NewHandler(&buf, &Options{
+		Level:      slog.LevelInfo,
+		UseColors:  false,
+		TimeFormat: "", // 空文字列を明示的に指定
+	})
+
+	ctx := context.Background()
+	record := slog.NewRecord(time.Date(2024, 1, 15, 10, 30, 45, 123456789, time.UTC), slog.LevelInfo, "test", 0)
+	handler.Handle(ctx, record)
+
+	output := buf.String()
+	// デフォルトのミリ秒までのフォーマットが使用されるはず
+	if !strings.Contains(output, "2024-01-15 10:30:45.123") {
+		t.Errorf("expected default time format when empty string is provided, got: %s", output)
+	}
+}
+
 // TestConcurrentWrites は並行書き込みのテストです
 func TestConcurrentWrites(t *testing.T) {
 	var buf bytes.Buffer
