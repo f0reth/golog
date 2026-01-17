@@ -269,6 +269,8 @@ func (h *Handler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	// groupsも同様にコピーする必要がある (元のハンドラのgroupsを変更しないため)
 	newHandler.groups = make([]string, len(h.groups))
 	copy(newHandler.groups, h.groups)
+	// 新しいミューテックスを作成（ミューテックスの共有を防ぐ）
+	newHandler.mu = &sync.Mutex{}
 	return &newHandler
 }
 
@@ -282,6 +284,8 @@ func (h *Handler) WithGroup(name string) slog.Handler {
 	newHandler.groups = make([]string, len(h.groups)+1)
 	copy(newHandler.groups, h.groups)
 	newHandler.groups[len(h.groups)] = name
+	// 新しいミューテックスを作成（ミューテックスの共有を防ぐ）
+	newHandler.mu = &sync.Mutex{}
 	return &newHandler
 }
 
