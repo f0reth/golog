@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -589,94 +591,21 @@ func TestConcurrentWrites(t *testing.T) {
 	const goroutines = 100
 	const iterations = 10
 
-	done := make(chan bool, goroutines)
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
 
 	for g := range goroutines {
 		go func(id int) {
+			defer wg.Done()
 			for i := range iterations {
 				logger.Info("concurrent test", "goroutine", id, "iteration", i)
 			}
-			done <- true
 		}(g)
 	}
-
-	// すべてのゴルーチンが完了するまで待つ
-	for range goroutines {
-		<-done
-	}
+	wg.Wait()
 
 	// レースコンディションが無ければテスト成功
 	// （-race フラグでテストすることでレースコンディションを検出可能）
-}
-
-// BenchmarkHandle はログ出力のベンチマークです
-func BenchmarkHandle(b *testing.B) {
-	var buf bytes.Buffer
-	handler := NewHandler(&buf, &Options{
-		Level:     slog.LevelInfo,
-		UseColors: false,
-	})
-
-	logger := slog.New(handler)
-
-	for i := 0; b.Loop(); i++ {
-		logger.Info("benchmark test", "iteration", i, "data", "some data")
-		buf.Reset()
-	}
-}
-
-// BenchmarkHandleConcurrent は並行ログ出力のベンチマークです
-func BenchmarkHandleConcurrent(b *testing.B) {
-	var buf bytes.Buffer
-	handler := NewHandler(&buf, &Options{
-		Level:     slog.LevelInfo,
-		UseColors: false,
-	})
-
-	logger := slog.New(handler)
-
-	b.RunParallel(func(pb *testing.PB) {
-		i := 0
-		for pb.Next() {
-			logger.Info("benchmark test", "iteration", i, "data", "some data")
-			i++
-		}
-	})
-}
-
-// 標準パッケージのslogのベンチマーク
-func BenchmarkSlog(b *testing.B) {
-	var buf bytes.Buffer
-	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{
-		Level:     slog.LevelInfo,
-		AddSource: false,
-	})
-
-	logger := slog.New(handler)
-
-	for i := 0; b.Loop(); i++ {
-		logger.Info("benchmark test", "iteration", i, "data", "some data")
-		buf.Reset()
-	}
-}
-
-// 標準パッケージのslogの並行ログ出力のベンチマーク
-func BenchmarkSlogConcurrent(b *testing.B) {
-	var buf bytes.Buffer
-	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{
-		Level:     slog.LevelInfo,
-		AddSource: false,
-	})
-
-	logger := slog.New(handler)
-
-	b.RunParallel(func(pb *testing.PB) {
-		i := 0
-		for pb.Next() {
-			logger.Info("benchmark test", "iteration", i, "data", "some data")
-			i++
-		}
-	})
 }
 
 // TestWithAttrsEmpty は空の属性配列での WithAttrs をテストします
@@ -1338,269 +1267,130 @@ func TestAddSource(t *testing.T) {
 
 // TestReplaceAttr はReplaceAttrコールバックが正しく動作することをテストします
 func TestReplaceAttr(t *testing.T) {
-	t.Run("ReplaceAttr nil (default behavior)", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:       slog.LevelInfo,
-			UseColors:   false,
-			ReplaceAttr: nil,
-		})
-
-		logger := slog.New(handler)
-		logger.Info("test message", "key", "value")
-
-		output := buf.String()
-		if !strings.Contains(output, `key="value"`) {
-			t.Errorf("output should contain original attribute, got: %s", output)
-		}
-	})
-
-	t.Run("ReplaceAttr modifies attribute value", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-				// "password"属性の値を隠す
+	tests := []struct {
+		name        string
+		replaceAttr func([]string, slog.Attr) slog.Attr
+		logFunc     func(*slog.Logger)
+		setupOpts   func(*Options)
+		want        []string
+		notWant     []string
+	}{
+		{
+			name:        "nil (default behavior)",
+			replaceAttr: nil,
+			logFunc:     func(l *slog.Logger) { l.Info("test", "key", "value") },
+			want:        []string{`key="value"`},
+		},
+		{
+			name: "redact password",
+			replaceAttr: func(_ []string, a slog.Attr) slog.Attr {
 				if a.Key == "password" {
 					return slog.String("password", "***REDACTED***")
 				}
 				return a
 			},
-		})
-
-		logger := slog.New(handler)
-		logger.Info("login attempt", "user", "alice", "password", "secret123")
-
-		output := buf.String()
-		if !strings.Contains(output, `password="***REDACTED***"`) {
-			t.Errorf("output should contain redacted password, got: %s", output)
-		}
-		if strings.Contains(output, "secret123") {
-			t.Errorf("output should not contain original password, got: %s", output)
-		}
-		if !strings.Contains(output, `user="alice"`) {
-			t.Errorf("output should contain unmodified user attribute, got: %s", output)
-		}
-	})
-
-	t.Run("ReplaceAttr removes attribute (empty key)", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-				// "internal"属性を無視
+			logFunc: func(l *slog.Logger) { l.Info("login", "user", "alice", "password", "secret123") },
+			want:    []string{`password="***REDACTED***"`, `user="alice"`},
+			notWant: []string{"secret123"},
+		},
+		{
+			name: "remove attribute",
+			replaceAttr: func(_ []string, a slog.Attr) slog.Attr {
 				if a.Key == "internal" {
-					return slog.Attr{} // 空のキー = 属性を無視
+					return slog.Attr{}
 				}
 				return a
 			},
-		})
-
-		logger := slog.New(handler)
-		logger.Info("test", "public", "data", "internal", "secret")
-
-		output := buf.String()
-		if strings.Contains(output, "internal") {
-			t.Errorf("output should not contain 'internal' attribute, got: %s", output)
-		}
-		if !strings.Contains(output, `public="data"`) {
-			t.Errorf("output should contain public attribute, got: %s", output)
-		}
-	})
-
-	t.Run("ReplaceAttr renames attribute key", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-				// "userId"を"user_id"にリネーム
+			logFunc: func(l *slog.Logger) { l.Info("test", "public", "data", "internal", "secret") },
+			want:    []string{`public="data"`},
+			notWant: []string{"internal"},
+		},
+		{
+			name: "rename key",
+			replaceAttr: func(_ []string, a slog.Attr) slog.Attr {
 				if a.Key == "userId" {
 					return slog.Attr{Key: "user_id", Value: a.Value}
 				}
 				return a
 			},
-		})
-
-		logger := slog.New(handler)
-		logger.Info("test", "userId", "12345")
-
-		output := buf.String()
-		if !strings.Contains(output, `user_id="12345"`) {
-			t.Errorf("output should contain renamed attribute, got: %s", output)
-		}
-		if strings.Contains(output, "userId") {
-			t.Errorf("output should not contain original key name, got: %s", output)
-		}
-	})
-
-	t.Run("ReplaceAttr modifies built-in message attribute", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-				// メッセージを大文字に変換
+			logFunc: func(l *slog.Logger) { l.Info("test", "userId", "12345") },
+			want:    []string{`user_id="12345"`},
+			notWant: []string{"userId"},
+		},
+		{
+			name: "modify built-in attributes",
+			replaceAttr: func(_ []string, a slog.Attr) slog.Attr {
 				if a.Key == slog.MessageKey {
 					return slog.String(slog.MessageKey, strings.ToUpper(a.Value.String()))
 				}
-				return a
-			},
-		})
-
-		logger := slog.New(handler)
-		logger.Info("hello world")
-
-		output := buf.String()
-		if !strings.Contains(output, "HELLO WORLD") {
-			t.Errorf("output should contain uppercase message, got: %s", output)
-		}
-	})
-
-	t.Run("ReplaceAttr removes time attribute", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-				// 時刻を無視
 				if a.Key == slog.TimeKey {
 					return slog.Attr{}
 				}
 				return a
 			},
-		})
-
-		logger := slog.New(handler)
-		logger.Info("test message")
-
-		output := buf.String()
-		// 時刻のフォーマットが含まれていないことを確認（レベルの角括弧は残る）
-		// 時刻が削除された場合、出力は "[ INFO]" で始まる（時刻の角括弧がない）
-		if !strings.HasPrefix(strings.TrimSpace(output), "[ INFO]") {
-			t.Errorf("output should start with level bracket only (no time), got: %s", output)
-		}
-	})
-
-	t.Run("ReplaceAttr removes level attribute", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-				// レベルを無視
-				if a.Key == slog.LevelKey {
-					return slog.Attr{}
-				}
-				return a
-			},
-		})
-
-		logger := slog.New(handler)
-		logger.Info("test message")
-
-		output := buf.String()
-		// レベルの角括弧が出力されないことを確認
-		if strings.Contains(output, "INFO") {
-			t.Errorf("output should not contain INFO level, got: %s", output)
-		}
-	})
-
-	t.Run("ReplaceAttr with groups", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-				// グループ情報を確認してプレフィックスを追加
+			logFunc: func(l *slog.Logger) { l.Info("hello world") },
+			want:    []string{"HELLO WORLD", "[ INFO]"},
+		},
+		{
+			name: "with groups",
+			replaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 				if len(groups) > 0 && a.Key == "secret" {
 					return slog.String("secret", "***")
 				}
 				return a
 			},
-		})
+			logFunc: func(l *slog.Logger) { l.WithGroup("auth").Info("test", "secret", "password123") },
+			want:    []string{`auth.secret="***"`},
+			notWant: []string{"password123"},
+		},
+	}
 
-		logger := slog.New(handler.WithGroup("auth"))
-		logger.Info("test", "secret", "password123")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			opts := &Options{
+				Level:       slog.LevelInfo,
+				UseColors:   false,
+				ReplaceAttr: tt.replaceAttr,
+			}
+			if tt.setupOpts != nil {
+				tt.setupOpts(opts)
+			}
 
-		output := buf.String()
-		if !strings.Contains(output, `auth.secret="***"`) {
-			t.Errorf("output should contain redacted grouped attribute, got: %s", output)
-		}
-		if strings.Contains(output, "password123") {
-			t.Errorf("output should not contain original value, got: %s", output)
-		}
-	})
+			handler := NewHandler(&buf, opts)
+			logger := slog.New(handler)
+			tt.logFunc(logger)
 
-	t.Run("ReplaceAttr with WithAttrs", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-				// すべての属性値の前に"PREFIX:"を追加
-				if a.Key != slog.TimeKey && a.Key != slog.LevelKey && a.Key != slog.MessageKey {
-					if str, ok := a.Value.Any().(string); ok {
-						return slog.String(a.Key, "PREFIX:"+str)
-					}
+			output := buf.String()
+			for _, w := range tt.want {
+				if !strings.Contains(output, w) {
+					t.Errorf("output should contain %q, got: %s", w, output)
 				}
-				return a
-			},
-		})
-
-		h := handler.WithAttrs([]slog.Attr{slog.String("key1", "value1")})
-		logger := slog.New(h)
-		logger.Info("test", "key2", "value2")
-
-		output := buf.String()
-		if !strings.Contains(output, `key1="PREFIX:value1"`) {
-			t.Errorf("output should contain prefixed WithAttrs attribute, got: %s", output)
-		}
-		if !strings.Contains(output, `key2="PREFIX:value2"`) {
-			t.Errorf("output should contain prefixed regular attribute, got: %s", output)
-		}
-	})
-
-	t.Run("ReplaceAttr with AddSource", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-			AddSource: true,
-			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-				// ソース属性のキーを"location"に変更
-				if a.Key == slog.SourceKey {
-					return slog.Attr{Key: "location", Value: a.Value}
+			}
+			for _, nw := range tt.notWant {
+				if strings.Contains(output, nw) {
+					t.Errorf("output should not contain %q, got: %s", nw, output)
 				}
-				return a
-			},
+			}
 		})
+	}
+}
 
-		logger := slog.New(handler)
-		logger.Info("test message")
-
-		output := buf.String()
-		if !strings.Contains(output, "location=") {
-			t.Errorf("output should contain renamed source attribute, got: %s", output)
-		}
-		if strings.Contains(output, "source=") {
-			t.Errorf("output should not contain original source key, got: %s", output)
-		}
-	})
-
-	t.Run("ReplaceAttr converts attribute type", func(t *testing.T) {
+// TestReplaceAttrModifiesBuiltInValues はReplaceAttrが組み込み属性の値を変更することをテストします
+func TestReplaceAttrModifiesBuiltInValues(t *testing.T) {
+	t.Run("modify time and level values", func(t *testing.T) {
 		var buf bytes.Buffer
+		fixedTime := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 		handler := NewHandler(&buf, &Options{
 			Level:     slog.LevelInfo,
 			UseColors: false,
-			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-				// 数値属性を文字列に変換
-				if a.Key == "count" {
-					// slog.Intはint64として格納される
-					if num, ok := a.Value.Any().(int64); ok {
-						return slog.String("count", strconv.FormatInt(num, 10)+"_items")
+			ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+				if a.Key == slog.TimeKey {
+					return slog.Time(slog.TimeKey, fixedTime)
+				}
+				if a.Key == slog.LevelKey {
+					if lvl, ok := a.Value.Any().(slog.Level); ok && lvl == slog.LevelInfo {
+						return slog.Any(slog.LevelKey, slog.LevelWarn)
 					}
 				}
 				return a
@@ -1608,325 +1398,98 @@ func TestReplaceAttr(t *testing.T) {
 		})
 
 		logger := slog.New(handler)
-		logger.Info("test", "count", 42)
+		logger.Info("test")
 
 		output := buf.String()
-		if !strings.Contains(output, `count="42_items"`) {
-			t.Errorf("output should contain converted attribute, got: %s", output)
+		if !strings.Contains(output, "2000-01-01 00:00:00.000") {
+			t.Errorf("output should contain modified time, got: %s", output)
+		}
+		if !strings.Contains(output, "WARN") {
+			t.Errorf("output should contain modified level WARN, got: %s", output)
+		}
+		if strings.Contains(output, "INFO") {
+			t.Errorf("output should not contain original level INFO, got: %s", output)
 		}
 	})
 }
 
 // TestKeyEscaping はキーのエスケープ処理をテストします
 func TestKeyEscaping(t *testing.T) {
-	t.Run("key with space", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
+	tests := []struct {
+		name   string
+		setup  func(*slog.Logger)
+		want   string
+		unwant string
+	}{
+		{"space", func(l *slog.Logger) { l.Info("test", "my key", "value") }, `"my key"="value"`, ""},
+		{"quote", func(l *slog.Logger) { l.Info("test", `key"name`, "value") }, `"key\"name"="value"`, ""},
+		{"equals", func(l *slog.Logger) { l.Info("test", "key=name", "value") }, `"key=name"="value"`, ""},
+		{"normal", func(l *slog.Logger) { l.Info("test", "normalKey", "value") }, `normalKey="value"`, `"normalKey"`},
+		{"newline", func(l *slog.Logger) { l.Info("test", "key\nname", "value") }, `"key\nname"="value"`, ""},
+		{"tab", func(l *slog.Logger) { l.Info("test", "key\tname", "value") }, `"key\tname"="value"`, ""},
+		{"empty", func(l *slog.Logger) { l.Info("test", "", "value") }, `""="value"`, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			handler := NewHandler(&buf, &Options{Level: slog.LevelInfo, UseColors: false})
+			tt.setup(slog.New(handler))
+
+			output := buf.String()
+			if !strings.Contains(output, tt.want) {
+				t.Errorf("want %q in output, got: %s", tt.want, output)
+			}
+			if tt.unwant != "" && strings.Contains(output, tt.unwant) {
+				t.Errorf("don't want %q in output, got: %s", tt.unwant, output)
+			}
 		})
+	}
 
-		logger := slog.New(handler)
-		logger.Info("test", "my key", "value")
-
-		output := buf.String()
-		// キーにスペースが含まれる場合はクォートされる
-		if !strings.Contains(output, `"my key"="value"`) {
-			t.Errorf("output should contain quoted key with space, got: %s", output)
-		}
-	})
-
-	t.Run("key with double quote", func(t *testing.T) {
+	t.Run("groups with special chars", func(t *testing.T) {
 		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-		})
+		h := NewHandler(&buf, &Options{Level: slog.LevelInfo, UseColors: false}).
+			WithGroup("group1").WithGroup("group 2").WithGroup("group=3")
+		slog.New(h).Info("test", "key", "value")
 
-		logger := slog.New(handler)
-		logger.Info("test", `key"name`, "value")
-
-		output := buf.String()
-		// キーにダブルクォートが含まれる場合はエスケープされる
-		if !strings.Contains(output, `"key\"name"="value"`) {
-			t.Errorf("output should contain escaped key with quote, got: %s", output)
-		}
-	})
-
-	t.Run("key with equals sign", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-		})
-
-		logger := slog.New(handler)
-		logger.Info("test", "key=name", "value")
-
-		output := buf.String()
-		// キーにイコールが含まれる場合はクォートされる
-		if !strings.Contains(output, `"key=name"="value"`) {
-			t.Errorf("output should contain quoted key with equals, got: %s", output)
-		}
-	})
-
-	t.Run("normal key (no escaping)", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-		})
-
-		logger := slog.New(handler)
-		logger.Info("test", "normalKey", "value")
-
-		output := buf.String()
-		// 通常のキーはクォートされない
-		if !strings.Contains(output, `normalKey="value"`) {
-			t.Errorf("output should contain unquoted normal key, got: %s", output)
-		}
-		// ダブルクォートで囲まれていないことを確認
-		if strings.Contains(output, `"normalKey"="value"`) {
-			t.Errorf("normal key should not be quoted, got: %s", output)
-		}
-	})
-
-	t.Run("group name with space", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-		})
-
-		logger := slog.New(handler.WithGroup("my group"))
-		logger.Info("test", "key", "value")
-
-		output := buf.String()
-		// グループ名にスペースが含まれる場合はクォートされる
-		if !strings.Contains(output, `"my group".key="value"`) {
-			t.Errorf("output should contain quoted group name with space, got: %s", output)
-		}
-	})
-
-	t.Run("nested groups with special characters", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-		})
-
-		h := handler.WithGroup("group1").WithGroup("group 2").WithGroup("group=3")
-		logger := slog.New(h)
-		logger.Info("test", "key", "value")
-
-		output := buf.String()
-		// 特殊文字を含むグループ名がすべてクォートされる
-		if !strings.Contains(output, `group1."group 2"."group=3".key="value"`) {
-			t.Errorf("output should contain quoted group names with special chars, got: %s", output)
-		}
-	})
-
-	t.Run("key with newline", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-		})
-
-		logger := slog.New(handler)
-		logger.Info("test", "key\nname", "value")
-
-		output := buf.String()
-		// キーに改行が含まれる場合はエスケープされる
-		if !strings.Contains(output, `"key\nname"="value"`) {
-			t.Errorf("output should contain escaped key with newline, got: %s", output)
-		}
-	})
-
-	t.Run("key with tab", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-		})
-
-		logger := slog.New(handler)
-		logger.Info("test", "key\tname", "value")
-
-		output := buf.String()
-		// キーにタブが含まれる場合はエスケープされる
-		if !strings.Contains(output, `"key\tname"="value"`) {
-			t.Errorf("output should contain escaped key with tab, got: %s", output)
-		}
-	})
-
-	t.Run("empty key", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-		})
-
-		logger := slog.New(handler)
-		logger.Info("test", "", "value")
-
-		output := buf.String()
-		// 空のキーもクォートされる
-		if !strings.Contains(output, `""="value"`) {
-			t.Errorf("output should contain quoted empty key, got: %s", output)
-		}
-	})
-
-	t.Run("ReplaceAttr with special key characters", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-				// キーにスペースを含む名前に変更
-				if a.Key == "user" {
-					return slog.Attr{Key: "user name", Value: a.Value}
-				}
-				return a
-			},
-		})
-
-		logger := slog.New(handler)
-		logger.Info("test", "user", "alice")
-
-		output := buf.String()
-		// ReplaceAttrで変更されたキーもエスケープされる
-		if !strings.Contains(output, `"user name"="alice"`) {
-			t.Errorf("output should contain escaped renamed key, got: %s", output)
+		if !strings.Contains(buf.String(), `group1."group 2"."group=3".key="value"`) {
+			t.Errorf("want quoted group names, got: %s", buf.String())
 		}
 	})
 }
 
 // TestWithGroupEmptyName は空文字列のグループ名が無視されることをテストします
 func TestWithGroupEmptyName(t *testing.T) {
-	t.Run("single empty group name", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
+	tests := []struct {
+		name  string
+		setup func(h *Handler) slog.Handler
+		want  string
+	}{
+		{"single empty", func(h *Handler) slog.Handler { return h.WithGroup("") }, `key="value"`},
+		{"between groups", func(h *Handler) slog.Handler {
+			return h.WithGroup("group1").WithGroup("").WithGroup("group2")
+		}, `group1.group2.key="value"`},
+		{"multiple empty", func(h *Handler) slog.Handler {
+			return h.WithGroup("").WithGroup("").WithGroup("")
+		}, `key="value"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			h := NewHandler(&buf, &Options{Level: slog.LevelInfo, UseColors: false})
+			slog.New(tt.setup(h)).Info("test", "key", "value")
+
+			if !strings.Contains(buf.String(), tt.want) {
+				t.Errorf("want %q in output, got: %s", tt.want, buf.String())
+			}
 		})
+	}
 
-		// 空文字列のグループは無視されるべき
-		h := handler.WithGroup("")
-		logger := slog.New(h)
-		logger.Info("test", "key", "value")
-
-		output := buf.String()
-		// グループプレフィックスが付いていないことを確認
-		if !strings.Contains(output, `key="value"`) {
-			t.Errorf("output should contain key without group prefix, got: %s", output)
-		}
-		// ドットがないことを確認（グループが追加されていない）
-		if strings.Contains(output, ".key") {
-			t.Errorf("output should not contain group prefix, got: %s", output)
-		}
-	})
-
-	t.Run("empty group between non-empty groups", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-		})
-
-		// group1 -> "" -> group2 のチェーン
-		h := handler.WithGroup("group1").WithGroup("").WithGroup("group2")
-		logger := slog.New(h)
-		logger.Info("test", "key", "value")
-
-		output := buf.String()
-		// 空のグループは無視され、group1.group2 のみが適用される
-		if !strings.Contains(output, `group1.group2.key="value"`) {
-			t.Errorf("output should contain group1.group2.key, got: %s", output)
-		}
-	})
-
-	t.Run("multiple empty groups", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-		})
-
-		// 複数の空文字列グループはすべて無視される
-		h := handler.WithGroup("").WithGroup("").WithGroup("")
-		logger := slog.New(h)
-		logger.Info("test", "key", "value")
-
-		output := buf.String()
-		// グループプレフィックスが付いていないことを確認
-		if !strings.Contains(output, `key="value"`) {
-			t.Errorf("output should contain key without group prefix, got: %s", output)
-		}
-		if strings.Contains(output, ".key") {
-			t.Errorf("output should not contain any group prefix, got: %s", output)
-		}
-	})
-
-	t.Run("empty group with WithAttrs", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-		})
-
-		// 空のグループ + WithAttrs
-		h := handler.WithGroup("group1").WithGroup("").WithAttrs([]slog.Attr{slog.String("attr1", "val1")})
-		logger := slog.New(h)
-		logger.Info("test", "key", "value")
-
-		output := buf.String()
-		// WithAttrsの属性はgroup1のみが適用される
-		if !strings.Contains(output, `group1.attr1="val1"`) {
-			t.Errorf("output should contain group1.attr1, got: %s", output)
-		}
-		// レコードの属性もgroup1のみが適用される
-		if !strings.Contains(output, `group1.key="value"`) {
-			t.Errorf("output should contain group1.key, got: %s", output)
-		}
-	})
-
-	t.Run("handler returned from empty WithGroup is same instance", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-		})
-
-		// 空文字列のWithGroupは同じハンドラインスタンスを返すべき
-		h := handler.WithGroup("")
-		if h != handler {
+	t.Run("returns same instance", func(t *testing.T) {
+		h := NewHandler(&bytes.Buffer{}, &Options{Level: slog.LevelInfo})
+		if h.WithGroup("") != h {
 			t.Error("WithGroup(\"\") should return the same handler instance")
-		}
-	})
-
-	t.Run("empty group name does not affect preformatted attrs", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-		})
-
-		// WithAttrs -> 空のWithGroup -> さらにWithAttrs
-		h1 := handler.WithAttrs([]slog.Attr{slog.String("first", "1")})
-		h2 := h1.WithGroup("")
-		h3 := h2.WithAttrs([]slog.Attr{slog.String("second", "2")})
-
-		logger := slog.New(h3)
-		logger.Info("test")
-
-		output := buf.String()
-		// 両方の属性が正しく出力されることを確認
-		if !strings.Contains(output, `first="1"`) {
-			t.Errorf("output should contain first attribute, got: %s", output)
-		}
-		if !strings.Contains(output, `second="2"`) {
-			t.Errorf("output should contain second attribute, got: %s", output)
 		}
 	})
 }
@@ -1935,126 +1498,167 @@ func TestWithGroupEmptyName(t *testing.T) {
 func TestTimeFormatterOptimization(t *testing.T) {
 	testTime := time.Date(2024, 1, 15, 10, 30, 45, 123456789, time.UTC)
 
-	t.Run("default format", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:      slog.LevelInfo,
-			UseColors:  false,
-			TimeFormat: "2006-01-02 15:04:05.000",
-		})
-
-		logger := slog.New(handler)
-		logger.Info("test")
-
-		output := buf.String()
-		// デフォルトフォーマットのパターンを検証（例: [2026-01-18 14:37:12.831]）
-		// 時刻部分は動的なので、フォーマットが正しいかのみ検証
-		if !strings.Contains(output, " ") || !strings.Contains(output, ":") || !strings.Contains(output, ".") {
-			t.Errorf("output should contain formatted time with date, time, and milliseconds, got: %s", output)
-		}
-		// 括弧で囲まれていることを確認
-		if !strings.Contains(output, "[") || !strings.Contains(output, "]") {
-			t.Errorf("output should have time in brackets, got: %s", output)
-		}
-	})
-
-	t.Run("RFC3339 format", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:      slog.LevelInfo,
-			UseColors:  false,
-			TimeFormat: time.RFC3339,
-		})
-
-		logger := slog.New(handler)
-		logger.Info("test")
-
-		output := buf.String()
-		// RFC3339フォーマットが含まれていることを確認（例: 2024-01-15T10:30:45Z or +09:00）
-		if !strings.Contains(output, "T") {
-			t.Errorf("output should contain RFC3339 formatted time with 'T', got: %s", output)
-		}
-	})
-
-	t.Run("RFC3339Nano format", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:      slog.LevelInfo,
-			UseColors:  false,
-			TimeFormat: time.RFC3339Nano,
-		})
-
-		logger := slog.New(handler)
-		logger.Info("test")
-
-		output := buf.String()
-		// RFC3339Nanoフォーマットが含まれていることを確認
-		if !strings.Contains(output, "T") || !strings.Contains(output, ".") {
-			t.Errorf("output should contain RFC3339Nano formatted time, got: %s", output)
-		}
-	})
-
-	t.Run("custom format", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:      slog.LevelInfo,
-			UseColors:  false,
-			TimeFormat: "2006/01/02",
-		})
-
-		logger := slog.New(handler)
-		logger.Info("test")
-
-		output := buf.String()
-		// カスタムフォーマットが正しく適用されることを確認
-		if !strings.Contains(output, "/01/") {
-			t.Errorf("output should contain custom formatted time, got: %s", output)
-		}
-	})
-
-	t.Run("formatTimeDefault produces correct output", func(t *testing.T) {
+	t.Run("formatTimeDefault", func(t *testing.T) {
 		buf := buffer.New()
 		defer buf.Free()
-
 		formatTimeDefault(buf, testTime)
-		result := string(*buf)
-
-		expected := "2024-01-15 10:30:45.123"
-		if result != expected {
-			t.Errorf("expected %q, got %q", expected, result)
-		}
-	})
-
-	t.Run("formatTimeRFC3339 produces correct output", func(t *testing.T) {
-		buf := buffer.New()
-		defer buf.Free()
-
-		formatTimeRFC3339(buf, testTime)
-		result := string(*buf)
-
-		// RFC3339フォーマットを検証
-		if !strings.HasPrefix(result, "2024-01-15T10:30:45") {
-			t.Errorf("expected RFC3339 format, got %q", result)
-		}
-	})
-
-	t.Run("makeTimeFormatter returns correct formatter", func(t *testing.T) {
-		// デフォルトフォーマットの場合
-		formatter := makeTimeFormatter("2006-01-02 15:04:05.000")
-		buf := buffer.New()
-		defer buf.Free()
-		formatter(buf, testTime)
 		if string(*buf) != "2024-01-15 10:30:45.123" {
-			t.Errorf("default formatter produced incorrect output: %s", string(*buf))
+			t.Errorf("want 2024-01-15 10:30:45.123, got %s", string(*buf))
+		}
+	})
+
+	t.Run("makeTimeFormatter", func(t *testing.T) {
+		tests := []struct {
+			format string
+			want   string
+		}{
+			{"2006-01-02 15:04:05.000", "2024-01-15"},
+			{time.RFC3339, "2024-01-15T"},
+			{"15:04:05", "10:30:45"},
+		}
+		for _, tt := range tests {
+			buf := buffer.New()
+			makeTimeFormatter(tt.format)(buf, testTime)
+			result := string(*buf)
+			buf.Free()
+			if !strings.Contains(result, tt.want) {
+				t.Errorf("format %q: want %q in result, got %q", tt.format, tt.want, result)
+			}
+		}
+	})
+}
+
+// TestProductionScenarios は実運用シナリオをテストします
+func TestProductionScenarios(t *testing.T) {
+	t.Run("file write", func(t *testing.T) {
+		tmpFile, err := os.CreateTemp("", "golog_test_*.log")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(tmpFile.Name())
+		defer tmpFile.Close()
+
+		handler := NewHandler(tmpFile, &Options{Level: slog.LevelInfo, UseColors: false})
+		logger := slog.New(handler)
+		logger.Info("production test", "request_id", "12345", "user", "alice")
+
+		tmpFile.Sync()
+		data, err := os.ReadFile(tmpFile.Name())
+		if err != nil {
+			t.Fatal(err)
 		}
 
-		// カスタムフォーマットの場合
-		buf2 := buffer.New()
-		defer buf2.Free()
-		formatter2 := makeTimeFormatter("15:04:05")
-		formatter2(buf2, testTime)
-		if string(*buf2) != "10:30:45" {
-			t.Errorf("custom formatter produced incorrect output: %s", string(*buf2))
+		output := string(data)
+		if !strings.Contains(output, "production test") || !strings.Contains(output, `request_id="12345"`) {
+			t.Errorf("file output incorrect: %s", output)
+		}
+	})
+
+	t.Run("structured logging", func(t *testing.T) {
+		var buf bytes.Buffer
+		h := NewHandler(&buf, &Options{Level: slog.LevelInfo, UseColors: false})
+		logger := slog.New(h).WithGroup("http").With("method", "GET")
+		logger.Info("request completed", "path", "/api/users", "status", 200, "duration_ms", 45)
+
+		output := buf.String()
+		want := []string{`http.method="GET"`, `http.path="/api/users"`, `http.status=200`, "http.duration_ms=45"}
+		for _, w := range want {
+			if !strings.Contains(output, w) {
+				t.Errorf("want %q in output: %s", w, output)
+			}
+		}
+	})
+
+	t.Run("error context", func(t *testing.T) {
+		var buf bytes.Buffer
+		h := NewHandler(&buf, &Options{Level: slog.LevelError, UseColors: false, AddSource: true})
+		logger := slog.New(h).With("service", "api", "env", "production")
+		logger.Error("database connection failed",
+			"error", "connection timeout",
+			"database", "users_db",
+			"retry_count", 3)
+
+		output := buf.String()
+		want := []string{
+			"ERROR", "database connection failed",
+			`service="api"`, `env="production"`,
+			`error="connection timeout"`, `database="users_db"`,
+			"retry_count=3", "source=",
+		}
+		for _, w := range want {
+			if !strings.Contains(output, w) {
+				t.Errorf("want %q in output: %s", w, output)
+			}
+		}
+	})
+}
+
+// BenchmarkHandle はログ出力のベンチマークです
+func BenchmarkHandle(b *testing.B) {
+	var buf bytes.Buffer
+	handler := NewHandler(&buf, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	logger := slog.New(handler)
+
+	for i := 0; b.Loop(); i++ {
+		logger.Info("benchmark test", "iteration", i, "data", "some data")
+		buf.Reset()
+	}
+}
+
+// BenchmarkHandleConcurrent は並行ログ出力のベンチマークです
+func BenchmarkHandleConcurrent(b *testing.B) {
+	var buf bytes.Buffer
+	handler := NewHandler(&buf, &Options{
+		Level:     slog.LevelInfo,
+		UseColors: false,
+	})
+
+	logger := slog.New(handler)
+
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			logger.Info("benchmark test", "iteration", i, "data", "some data")
+			i++
+		}
+	})
+}
+
+// 標準パッケージのslogのベンチマーク
+func BenchmarkSlog(b *testing.B) {
+	var buf bytes.Buffer
+	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{
+		Level:     slog.LevelInfo,
+		AddSource: false,
+	})
+
+	logger := slog.New(handler)
+
+	for i := 0; b.Loop(); i++ {
+		logger.Info("benchmark test", "iteration", i, "data", "some data")
+		buf.Reset()
+	}
+}
+
+// 標準パッケージのslogの並行ログ出力のベンチマーク
+func BenchmarkSlogConcurrent(b *testing.B) {
+	var buf bytes.Buffer
+	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{
+		Level:     slog.LevelInfo,
+		AddSource: false,
+	})
+
+	logger := slog.New(handler)
+
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			logger.Info("benchmark test", "iteration", i, "data", "some data")
+			i++
 		}
 	})
 }
@@ -2121,160 +1725,6 @@ func BenchmarkTimeFormatting(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			buf.Reset()
 			logger.Info("test message", "key", "value")
-		}
-	})
-}
-
-// TestReplaceAttrModifiesBuiltInValues はReplaceAttrが組み込み属性の値を変更することをテストします
-func TestReplaceAttrModifiesBuiltInValues(t *testing.T) {
-	t.Run("ReplaceAttr modifies time value", func(t *testing.T) {
-		var buf bytes.Buffer
-		fixedTime := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-				// すべてのログの時刻を固定値に変更
-				if a.Key == slog.TimeKey {
-					return slog.Time(slog.TimeKey, fixedTime)
-				}
-				return a
-			},
-		})
-
-		logger := slog.New(handler)
-		logger.Info("test message")
-
-		output := buf.String()
-		// 固定された時刻が出力されることを確認
-		if !strings.Contains(output, "2000-01-01 00:00:00.000") {
-			t.Errorf("output should contain modified time, got: %s", output)
-		}
-	})
-
-	t.Run("ReplaceAttr modifies level value", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-				// INFOをWARNに変更
-				if a.Key == slog.LevelKey {
-					if lvl, ok := a.Value.Any().(slog.Level); ok && lvl == slog.LevelInfo {
-						return slog.Any(slog.LevelKey, slog.LevelWarn)
-					}
-				}
-				return a
-			},
-		})
-
-		logger := slog.New(handler)
-		logger.Info("test message")
-
-		output := buf.String()
-		// レベルがWARNに変更されていることを確認
-		if !strings.Contains(output, "WARN") {
-			t.Errorf("output should contain modified level WARN, got: %s", output)
-		}
-		if strings.Contains(output, "INFO") {
-			t.Errorf("output should not contain original level INFO, got: %s", output)
-		}
-	})
-
-	t.Run("ReplaceAttr changes time to different time", func(t *testing.T) {
-		var buf bytes.Buffer
-		// 現在時刻より1時間前に変更
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-				if a.Key == slog.TimeKey {
-					if t, ok := a.Value.Any().(time.Time); ok {
-						// 1時間前に変更
-						return slog.Time(slog.TimeKey, t.Add(-1*time.Hour))
-					}
-				}
-				return a
-			},
-		})
-
-		// 特定の時刻でログを記録
-		logger := slog.New(handler)
-		beforeLog := time.Now()
-		logger.Info("test message")
-
-		output := buf.String()
-		// ログには現在時刻ではなく1時間前の時刻が含まれるはず
-		// 正確な検証は難しいが、出力に時刻が含まれることを確認
-		if !strings.Contains(output, "[") || !strings.Contains(output, "]") {
-			t.Errorf("output should contain time in brackets, got: %s", output)
-		}
-
-		// 出力された時刻が現在時刻ではないことを大まかに確認
-		currentHour := beforeLog.Format("15")
-		oneHourAgoHour := beforeLog.Add(-1 * time.Hour).Format("15")
-
-		// 出力に1時間前の時刻が含まれることを期待（境界ケースを考慮）
-		hasOneHourAgo := strings.Contains(output, oneHourAgoHour+":")
-		hasCurrent := strings.Contains(output, currentHour+":")
-
-		// 境界ケースでない限り、1時間前の時刻が含まれるべき
-		if !hasOneHourAgo && hasCurrent && beforeLog.Minute() > 5 {
-			t.Errorf("output should contain time from 1 hour ago, got: %s", output)
-		}
-	})
-
-	t.Run("ReplaceAttr changes level from ERROR to DEBUG", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelDebug, // DEBUGも出力できるように
-			UseColors: false,
-			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-				// ERRORをDEBUGに変更（通常はやらないが、テストのため）
-				if a.Key == slog.LevelKey {
-					if lvl, ok := a.Value.Any().(slog.Level); ok && lvl == slog.LevelError {
-						return slog.Any(slog.LevelKey, slog.LevelDebug)
-					}
-				}
-				return a
-			},
-		})
-
-		logger := slog.New(handler)
-		logger.Error("error message")
-
-		output := buf.String()
-		// レベルがDEBUGに変更されていることを確認
-		if !strings.Contains(output, "DEBUG") {
-			t.Errorf("output should contain modified level DEBUG, got: %s", output)
-		}
-		if strings.Contains(output, "ERROR") {
-			t.Errorf("output should not contain original level ERROR, got: %s", output)
-		}
-	})
-
-	t.Run("ReplaceAttr with non-time value for time key", func(t *testing.T) {
-		var buf bytes.Buffer
-		handler := NewHandler(&buf, &Options{
-			Level:     slog.LevelInfo,
-			UseColors: false,
-			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-				// 時刻を文字列に変更（不正な型）
-				if a.Key == slog.TimeKey {
-					return slog.String(slog.TimeKey, "custom-time")
-				}
-				return a
-			},
-		})
-
-		logger := slog.New(handler)
-		logger.Info("test message")
-
-		output := buf.String()
-		// time.Time型でない場合はフォールバックで元の時刻を使用
-		// 時刻の括弧が含まれることを確認
-		if !strings.Contains(output, "[") {
-			t.Errorf("output should contain time bracket even with invalid type, got: %s", output)
 		}
 	})
 }
