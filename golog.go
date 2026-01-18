@@ -112,7 +112,6 @@ type Handler struct {
 	minLevel          slog.Level
 	timeFormat        string
 	timeFormatter     timeFormatterFunc                           // 最適化された時刻フォーマット関数
-	attrs             []slog.Attr
 	groups            []string
 	useColors         bool                                        // 色を使用するかどうかのフラグ
 	addSource         bool                                        // ソースファイルと行番号を追加するかどうか
@@ -155,7 +154,6 @@ func NewHandler(w io.Writer, opts *Options) *Handler {
 		minLevel:      level,
 		timeFormat:    timeFormat,
 		timeFormatter: makeTimeFormatter(timeFormat),
-		attrs:         []slog.Attr{},
 		groups:        []string{},
 		useColors:     useColors,
 		addSource:     addSource,
@@ -490,9 +488,6 @@ func (h *Handler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	// 事前フォーマット済み属性として保存
 	newHandler.preformattedAttrs = make([]byte, buf.Len())
 	copy(newHandler.preformattedAttrs, *buf)
-
-	// attrsフィールドは互換性のために保持（現在は使用されていない）
-	newHandler.attrs = nil
 
 	// ミューテックスは共有する（標準ライブラリと同じ戦略）
 	// newHandler.mu = h.mu (構造体のコピーで既に共有されている)
