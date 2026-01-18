@@ -2124,3 +2124,157 @@ func BenchmarkTimeFormatting(b *testing.B) {
 		}
 	})
 }
+
+// TestReplaceAttrModifiesBuiltInValues はReplaceAttrが組み込み属性の値を変更することをテストします
+func TestReplaceAttrModifiesBuiltInValues(t *testing.T) {
+	t.Run("ReplaceAttr modifies time value", func(t *testing.T) {
+		var buf bytes.Buffer
+		fixedTime := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				// すべてのログの時刻を固定値に変更
+				if a.Key == slog.TimeKey {
+					return slog.Time(slog.TimeKey, fixedTime)
+				}
+				return a
+			},
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test message")
+
+		output := buf.String()
+		// 固定された時刻が出力されることを確認
+		if !strings.Contains(output, "2000-01-01 00:00:00.000") {
+			t.Errorf("output should contain modified time, got: %s", output)
+		}
+	})
+
+	t.Run("ReplaceAttr modifies level value", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				// INFOをWARNに変更
+				if a.Key == slog.LevelKey {
+					if lvl, ok := a.Value.Any().(slog.Level); ok && lvl == slog.LevelInfo {
+						return slog.Any(slog.LevelKey, slog.LevelWarn)
+					}
+				}
+				return a
+			},
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test message")
+
+		output := buf.String()
+		// レベルがWARNに変更されていることを確認
+		if !strings.Contains(output, "WARN") {
+			t.Errorf("output should contain modified level WARN, got: %s", output)
+		}
+		if strings.Contains(output, "INFO") {
+			t.Errorf("output should not contain original level INFO, got: %s", output)
+		}
+	})
+
+	t.Run("ReplaceAttr changes time to different time", func(t *testing.T) {
+		var buf bytes.Buffer
+		// 現在時刻より1時間前に変更
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				if a.Key == slog.TimeKey {
+					if t, ok := a.Value.Any().(time.Time); ok {
+						// 1時間前に変更
+						return slog.Time(slog.TimeKey, t.Add(-1*time.Hour))
+					}
+				}
+				return a
+			},
+		})
+
+		// 特定の時刻でログを記録
+		logger := slog.New(handler)
+		beforeLog := time.Now()
+		logger.Info("test message")
+
+		output := buf.String()
+		// ログには現在時刻ではなく1時間前の時刻が含まれるはず
+		// 正確な検証は難しいが、出力に時刻が含まれることを確認
+		if !strings.Contains(output, "[") || !strings.Contains(output, "]") {
+			t.Errorf("output should contain time in brackets, got: %s", output)
+		}
+
+		// 出力された時刻が現在時刻ではないことを大まかに確認
+		currentHour := beforeLog.Format("15")
+		oneHourAgoHour := beforeLog.Add(-1 * time.Hour).Format("15")
+
+		// 出力に1時間前の時刻が含まれることを期待（境界ケースを考慮）
+		hasOneHourAgo := strings.Contains(output, oneHourAgoHour+":")
+		hasCurrent := strings.Contains(output, currentHour+":")
+
+		// 境界ケースでない限り、1時間前の時刻が含まれるべき
+		if !hasOneHourAgo && hasCurrent && beforeLog.Minute() > 5 {
+			t.Errorf("output should contain time from 1 hour ago, got: %s", output)
+		}
+	})
+
+	t.Run("ReplaceAttr changes level from ERROR to DEBUG", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelDebug, // DEBUGも出力できるように
+			UseColors: false,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				// ERRORをDEBUGに変更（通常はやらないが、テストのため）
+				if a.Key == slog.LevelKey {
+					if lvl, ok := a.Value.Any().(slog.Level); ok && lvl == slog.LevelError {
+						return slog.Any(slog.LevelKey, slog.LevelDebug)
+					}
+				}
+				return a
+			},
+		})
+
+		logger := slog.New(handler)
+		logger.Error("error message")
+
+		output := buf.String()
+		// レベルがDEBUGに変更されていることを確認
+		if !strings.Contains(output, "DEBUG") {
+			t.Errorf("output should contain modified level DEBUG, got: %s", output)
+		}
+		if strings.Contains(output, "ERROR") {
+			t.Errorf("output should not contain original level ERROR, got: %s", output)
+		}
+	})
+
+	t.Run("ReplaceAttr with non-time value for time key", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				// 時刻を文字列に変更（不正な型）
+				if a.Key == slog.TimeKey {
+					return slog.String(slog.TimeKey, "custom-time")
+				}
+				return a
+			},
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test message")
+
+		output := buf.String()
+		// time.Time型でない場合はフォールバックで元の時刻を使用
+		// 時刻の括弧が含まれることを確認
+		if !strings.Contains(output, "[") {
+			t.Errorf("output should contain time bracket even with invalid type, got: %s", output)
+		}
+	})
+}

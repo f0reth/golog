@@ -185,7 +185,13 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	// 時刻が無視されていない場合は出力
 	if timeAttr.Key != "" {
 		buf.WriteByte('[')
-		h.timeFormatter(buf, r.Time)
+		// ReplaceAttrで変更された値を使用
+		if t, ok := timeAttr.Value.Any().(time.Time); ok {
+			h.timeFormatter(buf, t)
+		} else {
+			// time.Time型でない場合はフォールバック（元の時刻を使用）
+			h.timeFormatter(buf, r.Time)
+		}
 		buf.WriteString("] ")
 	}
 
@@ -196,8 +202,16 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	}
 	// レベルが無視されていない場合は出力
 	if levelAttr.Key != "" {
-		levelStr := h.formatLevelWithColor(r.Level)
 		buf.WriteByte('[')
+		// ReplaceAttrで変更された値を使用
+		var level slog.Level
+		if lvl, ok := levelAttr.Value.Any().(slog.Level); ok {
+			level = lvl
+		} else {
+			// slog.Level型でない場合はフォールバック（元のレベルを使用）
+			level = r.Level
+		}
+		levelStr := h.formatLevelWithColor(level)
 		buf.WriteString(levelStr)
 		buf.WriteString("] ")
 	}
