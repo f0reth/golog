@@ -1326,3 +1326,284 @@ func TestAddSource(t *testing.T) {
 		}
 	})
 }
+
+// TestReplaceAttr はReplaceAttrコールバックが正しく動作することをテストします
+func TestReplaceAttr(t *testing.T) {
+	t.Run("ReplaceAttr nil (default behavior)", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:       slog.LevelInfo,
+			UseColors:   false,
+			ReplaceAttr: nil,
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test message", "key", "value")
+
+		output := buf.String()
+		if !strings.Contains(output, `key="value"`) {
+			t.Errorf("output should contain original attribute, got: %s", output)
+		}
+	})
+
+	t.Run("ReplaceAttr modifies attribute value", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				// "password"属性の値を隠す
+				if a.Key == "password" {
+					return slog.String("password", "***REDACTED***")
+				}
+				return a
+			},
+		})
+
+		logger := slog.New(handler)
+		logger.Info("login attempt", "user", "alice", "password", "secret123")
+
+		output := buf.String()
+		if !strings.Contains(output, `password="***REDACTED***"`) {
+			t.Errorf("output should contain redacted password, got: %s", output)
+		}
+		if strings.Contains(output, "secret123") {
+			t.Errorf("output should not contain original password, got: %s", output)
+		}
+		if !strings.Contains(output, `user="alice"`) {
+			t.Errorf("output should contain unmodified user attribute, got: %s", output)
+		}
+	})
+
+	t.Run("ReplaceAttr removes attribute (empty key)", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				// "internal"属性を無視
+				if a.Key == "internal" {
+					return slog.Attr{} // 空のキー = 属性を無視
+				}
+				return a
+			},
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test", "public", "data", "internal", "secret")
+
+		output := buf.String()
+		if strings.Contains(output, "internal") {
+			t.Errorf("output should not contain 'internal' attribute, got: %s", output)
+		}
+		if !strings.Contains(output, `public="data"`) {
+			t.Errorf("output should contain public attribute, got: %s", output)
+		}
+	})
+
+	t.Run("ReplaceAttr renames attribute key", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				// "userId"を"user_id"にリネーム
+				if a.Key == "userId" {
+					return slog.Attr{Key: "user_id", Value: a.Value}
+				}
+				return a
+			},
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test", "userId", "12345")
+
+		output := buf.String()
+		if !strings.Contains(output, `user_id="12345"`) {
+			t.Errorf("output should contain renamed attribute, got: %s", output)
+		}
+		if strings.Contains(output, "userId") {
+			t.Errorf("output should not contain original key name, got: %s", output)
+		}
+	})
+
+	t.Run("ReplaceAttr modifies built-in message attribute", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				// メッセージを大文字に変換
+				if a.Key == slog.MessageKey {
+					return slog.String(slog.MessageKey, strings.ToUpper(a.Value.String()))
+				}
+				return a
+			},
+		})
+
+		logger := slog.New(handler)
+		logger.Info("hello world")
+
+		output := buf.String()
+		if !strings.Contains(output, "HELLO WORLD") {
+			t.Errorf("output should contain uppercase message, got: %s", output)
+		}
+	})
+
+	t.Run("ReplaceAttr removes time attribute", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				// 時刻を無視
+				if a.Key == slog.TimeKey {
+					return slog.Attr{}
+				}
+				return a
+			},
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test message")
+
+		output := buf.String()
+		// 時刻のフォーマットが含まれていないことを確認（レベルの角括弧は残る）
+		// 時刻が削除された場合、出力は "[ INFO]" で始まる（時刻の角括弧がない）
+		if !strings.HasPrefix(strings.TrimSpace(output), "[ INFO]") {
+			t.Errorf("output should start with level bracket only (no time), got: %s", output)
+		}
+	})
+
+	t.Run("ReplaceAttr removes level attribute", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				// レベルを無視
+				if a.Key == slog.LevelKey {
+					return slog.Attr{}
+				}
+				return a
+			},
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test message")
+
+		output := buf.String()
+		// レベルの角括弧が出力されないことを確認
+		if strings.Contains(output, "INFO") {
+			t.Errorf("output should not contain INFO level, got: %s", output)
+		}
+	})
+
+	t.Run("ReplaceAttr with groups", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				// グループ情報を確認してプレフィックスを追加
+				if len(groups) > 0 && a.Key == "secret" {
+					return slog.String("secret", "***")
+				}
+				return a
+			},
+		})
+
+		logger := slog.New(handler.WithGroup("auth"))
+		logger.Info("test", "secret", "password123")
+
+		output := buf.String()
+		if !strings.Contains(output, `auth.secret="***"`) {
+			t.Errorf("output should contain redacted grouped attribute, got: %s", output)
+		}
+		if strings.Contains(output, "password123") {
+			t.Errorf("output should not contain original value, got: %s", output)
+		}
+	})
+
+	t.Run("ReplaceAttr with WithAttrs", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				// すべての属性値の前に"PREFIX:"を追加
+				if a.Key != slog.TimeKey && a.Key != slog.LevelKey && a.Key != slog.MessageKey {
+					if str, ok := a.Value.Any().(string); ok {
+						return slog.String(a.Key, "PREFIX:"+str)
+					}
+				}
+				return a
+			},
+		})
+
+		h := handler.WithAttrs([]slog.Attr{slog.String("key1", "value1")})
+		logger := slog.New(h)
+		logger.Info("test", "key2", "value2")
+
+		output := buf.String()
+		if !strings.Contains(output, `key1="PREFIX:value1"`) {
+			t.Errorf("output should contain prefixed WithAttrs attribute, got: %s", output)
+		}
+		if !strings.Contains(output, `key2="PREFIX:value2"`) {
+			t.Errorf("output should contain prefixed regular attribute, got: %s", output)
+		}
+	})
+
+	t.Run("ReplaceAttr with AddSource", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+			AddSource: true,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				// ソース属性のキーを"location"に変更
+				if a.Key == slog.SourceKey {
+					return slog.Attr{Key: "location", Value: a.Value}
+				}
+				return a
+			},
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test message")
+
+		output := buf.String()
+		if !strings.Contains(output, "location=") {
+			t.Errorf("output should contain renamed source attribute, got: %s", output)
+		}
+		if strings.Contains(output, "source=") {
+			t.Errorf("output should not contain original source key, got: %s", output)
+		}
+	})
+
+	t.Run("ReplaceAttr converts attribute type", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				// 数値属性を文字列に変換
+				if a.Key == "count" {
+					// slog.Intはint64として格納される
+					if num, ok := a.Value.Any().(int64); ok {
+						return slog.String("count", strconv.FormatInt(num, 10)+"_items")
+					}
+				}
+				return a
+			},
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test", "count", 42)
+
+		output := buf.String()
+		if !strings.Contains(output, `count="42_items"`) {
+			t.Errorf("output should contain converted attribute, got: %s", output)
+		}
+	})
+}

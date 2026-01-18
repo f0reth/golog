@@ -32,18 +32,20 @@ type Handler struct {
 	timeFormat        string
 	attrs             []slog.Attr
 	groups            []string
-	useColors         bool        // 色を使用するかどうかのフラグ
-	addSource         bool        // ソースファイルと行番号を追加するかどうか
-	mu                *sync.Mutex // スレッドセーフな書き込みのためのミューテックス
-	preformattedAttrs []byte      // 事前フォーマット済みの属性（パフォーマンス最適化）
+	useColors         bool                                        // 色を使用するかどうかのフラグ
+	addSource         bool                                        // ソースファイルと行番号を追加するかどうか
+	replaceAttr       func(groups []string, a slog.Attr) slog.Attr // 属性を変換するコールバック
+	mu                *sync.Mutex                                 // スレッドセーフな書き込みのためのミューテックス
+	preformattedAttrs []byte                                      // 事前フォーマット済みの属性（パフォーマンス最適化）
 }
 
 // Options はカスタムハンドラーのオプション
 type Options struct {
-	Level      slog.Leveler
-	UseColors  bool
-	TimeFormat string // 時刻フォーマット（空の場合は "2006-01-02 15:04:05.000" を使用）
-	AddSource  bool   // ソースファイルと行番号を追加するかどうか
+	Level       slog.Leveler
+	UseColors   bool
+	TimeFormat  string                                      // 時刻フォーマット（空の場合は "2006-01-02 15:04:05.000" を使用）
+	AddSource   bool                                        // ソースファイルと行番号を追加するかどうか
+	ReplaceAttr func(groups []string, a slog.Attr) slog.Attr // 属性を変換するコールバック
 }
 
 // NewHandler は新しいカスタムハンドラーを作成します
@@ -51,6 +53,7 @@ func NewHandler(w io.Writer, opts *Options) *Handler {
 	var level slog.Level
 	useColors := false
 	addSource := false
+	var replaceAttr func(groups []string, a slog.Attr) slog.Attr
 	timeFormat := "2006-01-02 15:04:05.000" // デフォルト: ミリ秒までのフォーマット
 
 	if opts != nil {
@@ -59,20 +62,22 @@ func NewHandler(w io.Writer, opts *Options) *Handler {
 		}
 		useColors = opts.UseColors
 		addSource = opts.AddSource
+		replaceAttr = opts.ReplaceAttr
 		if opts.TimeFormat != "" {
 			timeFormat = opts.TimeFormat
 		}
 	}
 
 	return &Handler{
-		out:        w,
-		minLevel:   level,
-		timeFormat: timeFormat,
-		attrs:      []slog.Attr{},
-		groups:     []string{},
-		useColors:  useColors,
-		addSource:  addSource,
-		mu:         &sync.Mutex{},
+		out:         w,
+		minLevel:    level,
+		timeFormat:  timeFormat,
+		attrs:       []slog.Attr{},
+		groups:      []string{},
+		useColors:   useColors,
+		addSource:   addSource,
+		replaceAttr: replaceAttr,
+		mu:          &sync.Mutex{},
 	}
 }
 
@@ -91,23 +96,47 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	buf := buffer.New()
 	defer buf.Free()
 
-	// レベルのフォーマット（色付き）
-	levelStr := h.formatLevelWithColor(r.Level)
+	// 時刻属性の処理（ReplaceAttrが設定されている場合は適用）
+	timeAttr := slog.Time(slog.TimeKey, r.Time)
+	if h.replaceAttr != nil {
+		timeAttr = h.replaceAttr(nil, timeAttr)
+	}
+	// 時刻が無視されていない場合は出力
+	if timeAttr.Key != "" {
+		buf.WriteByte('[')
+		*buf = r.Time.AppendFormat(*buf, h.timeFormat)
+		buf.WriteString("] ")
+	}
 
-	// fmt.Fprintf を避けて直接書き込み
-	buf.WriteByte('[')
-	*buf = r.Time.AppendFormat(*buf, h.timeFormat) // 時刻のフォーマット
-	buf.WriteString("] [")
-	buf.WriteString(levelStr)
-	buf.WriteString("] msg=")
+	// レベル属性の処理（ReplaceAttrが設定されている場合は適用）
+	levelAttr := slog.Any(slog.LevelKey, r.Level)
+	if h.replaceAttr != nil {
+		levelAttr = h.replaceAttr(nil, levelAttr)
+	}
+	// レベルが無視されていない場合は出力
+	if levelAttr.Key != "" {
+		levelStr := h.formatLevelWithColor(r.Level)
+		buf.WriteByte('[')
+		buf.WriteString(levelStr)
+		buf.WriteString("] ")
+	}
 
-	formattedMsg, msgErr := formatValue(r.Message)
-	if msgErr != nil {
-		buf.WriteString("\"!ERROR:")
-		buf.WriteString(msgErr.Error())
-		buf.WriteByte('"')
-	} else {
-		buf.WriteString(formattedMsg)
+	// メッセージ属性の処理（ReplaceAttrが設定されている場合は適用）
+	msgAttr := slog.String(slog.MessageKey, r.Message)
+	if h.replaceAttr != nil {
+		msgAttr = h.replaceAttr(nil, msgAttr)
+	}
+	// メッセージが無視されていない場合は出力
+	if msgAttr.Key != "" {
+		buf.WriteString("msg=")
+		formattedMsg, msgErr := formatValue(msgAttr.Value.Any())
+		if msgErr != nil {
+			buf.WriteString("\"!ERROR:")
+			buf.WriteString(msgErr.Error())
+			buf.WriteByte('"')
+		} else {
+			buf.WriteString(formattedMsg)
+		}
 	}
 
 	// 事前フォーマット済みの属性を追加
@@ -124,14 +153,26 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 			file := filepath.Base(f.File)
 			// "file.go:42" 形式でフォーマット
 			sourceStr := file + ":" + strconv.Itoa(f.Line)
-			buf.WriteString(" source=")
-			buf.WriteString(strconv.Quote(sourceStr))
+
+			// ソース属性の処理（ReplaceAttrが設定されている場合は適用）
+			sourceAttr := slog.String(slog.SourceKey, sourceStr)
+			if h.replaceAttr != nil {
+				sourceAttr = h.replaceAttr(nil, sourceAttr)
+			}
+			// ソースが無視されていない場合は出力
+			if sourceAttr.Key != "" {
+				buf.WriteString(" ")
+				buf.WriteString(sourceAttr.Key)
+				buf.WriteString("=")
+				formattedSource, _ := formatValue(sourceAttr.Value.Any())
+				buf.WriteString(formattedSource)
+			}
 		}
 	}
 
 	// レコードの属性を追加
 	r.Attrs(func(attr slog.Attr) bool {
-		appendAttr(buf, attr.Key, attr.Value, h.groups) // レコードの属性は現在のグループで囲む
+		appendAttr(buf, attr.Key, attr.Value, h.groups, h.replaceAttr) // レコードの属性は現在のグループで囲む
 		return true
 	})
 
@@ -144,7 +185,17 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	return err
 }
 
-func appendAttr(buf *buffer.Buffer, key string, value slog.Value, groups []string) {
+func appendAttr(buf *buffer.Buffer, key string, value slog.Value, groups []string, replaceAttr func(groups []string, a slog.Attr) slog.Attr) {
+	// ReplaceAttr コールバックが設定されている場合は適用
+	attr := slog.Attr{Key: key, Value: value}
+	if replaceAttr != nil {
+		attr = replaceAttr(groups, attr)
+		// 空のキーが返された場合は属性を無視
+		if attr.Key == "" {
+			return
+		}
+	}
+
 	buf.WriteByte(' ') // キーの前にスペース
 
 	// グループプレフィックスを付ける
@@ -155,10 +206,10 @@ func appendAttr(buf *buffer.Buffer, key string, value slog.Value, groups []strin
 		}
 	}
 
-	buf.WriteString(key)
+	buf.WriteString(attr.Key)
 	buf.WriteByte('=')
 	// formatValueは slog.Value.Any() を受け取るので、value.Any() を渡す
-	jsonStr, err := formatValue(value.Any())
+	jsonStr, err := formatValue(attr.Value.Any())
 	if err != nil {
 		// slog.TextHandlerに倣ったエラー表示（fmt.Fprintf を避ける）
 		buf.WriteString("\"!ERROR:")
@@ -305,7 +356,7 @@ func (h *Handler) WithAttrs(attrs []slog.Attr) slog.Handler {
 
 	// 新しい属性をフォーマットして追加
 	for _, attr := range attrs {
-		appendAttr(buf, attr.Key, attr.Value, h.groups)
+		appendAttr(buf, attr.Key, attr.Value, h.groups, h.replaceAttr)
 	}
 
 	// 事前フォーマット済み属性として保存
