@@ -129,13 +129,10 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	// メッセージが無視されていない場合は出力
 	if msgAttr.Key != "" {
 		buf.WriteString("msg=")
-		formattedMsg, msgErr := formatValue(msgAttr.Value.Any())
-		if msgErr != nil {
+		if msgErr := formatValue(buf, msgAttr.Value.Any()); msgErr != nil {
 			buf.WriteString("\"!ERROR:")
 			buf.WriteString(msgErr.Error())
 			buf.WriteByte('"')
-		} else {
-			buf.WriteString(formattedMsg)
 		}
 	}
 
@@ -169,8 +166,7 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 					buf.WriteString(sourceAttr.Key)
 				}
 				buf.WriteString("=")
-				formattedSource, _ := formatValue(sourceAttr.Value.Any())
-				buf.WriteString(formattedSource)
+				formatValue(buf, sourceAttr.Value.Any()) // エラーは無視（slog標準の動作）
 			}
 		}
 	}
@@ -238,15 +234,12 @@ func appendAttr(buf *buffer.Buffer, key string, value slog.Value, groups []strin
 	}
 	buf.WriteByte('=')
 	// formatValueは slog.Value.Any() を受け取るので、value.Any() を渡す
-	jsonStr, err := formatValue(attr.Value.Any())
-	if err != nil {
+	if err := formatValue(buf, attr.Value.Any()); err != nil {
 		// slog.TextHandlerに倣ったエラー表示（fmt.Fprintf を避ける）
 		buf.WriteString("\"!ERROR:")
 		buf.WriteString(err.Error())
 		buf.WriteByte('"')
-		return
 	}
-	buf.WriteString(jsonStr)
 }
 
 // formatLevelWithColor はログレベルを色付きでフォーマットします
@@ -275,11 +268,12 @@ func (h *Handler) formatLevelWithColor(level slog.Level) string {
 	return colorCode + levelStr + colorReset
 }
 
-// formatValue は値を適切な形式に変換します
-func formatValue(v any) (string, error) {
+// formatValue は値を適切な形式に変換してバッファに書き込みます
+func formatValue(buf *buffer.Buffer, v any) error {
 	// nullの場合
 	if v == nil {
-		return "null", nil
+		buf.WriteString("null")
+		return nil
 	}
 
 	// slog.LogValuer インターフェースのチェック（標準ライブラリのサポート）
@@ -287,46 +281,65 @@ func formatValue(v any) (string, error) {
 		// LogValue() を呼び出して slog.Value を取得
 		value := lv.LogValue()
 		// slog.Value.Any() で実際の値を取得して再帰的に処理
-		return formatValue(value.Any())
+		return formatValue(buf, value.Any())
 	}
 
 	// 文字列の場合は strconv.Quote を使用して安全にエスケープ
 	// すべてのASCII制御文字や特殊文字を適切に処理
 	if s, ok := v.(string); ok {
-		return strconv.Quote(s), nil
+		buf.WriteString(strconv.Quote(s))
+		return nil
 	}
 
-	// 数値、真偽値の場合は strconv を使用（fmt.Sprintf より高速）
+	// 数値、真偽値の場合は strconv.Append* を使用（アロケーション削減）
 	switch v := v.(type) {
 	case int:
-		return strconv.FormatInt(int64(v), 10), nil
+		*buf = strconv.AppendInt(*buf, int64(v), 10)
+		return nil
 	case int8:
-		return strconv.FormatInt(int64(v), 10), nil
+		*buf = strconv.AppendInt(*buf, int64(v), 10)
+		return nil
 	case int16:
-		return strconv.FormatInt(int64(v), 10), nil
+		*buf = strconv.AppendInt(*buf, int64(v), 10)
+		return nil
 	case int32:
-		return strconv.FormatInt(int64(v), 10), nil
+		*buf = strconv.AppendInt(*buf, int64(v), 10)
+		return nil
 	case int64:
-		return strconv.FormatInt(v, 10), nil
+		*buf = strconv.AppendInt(*buf, v, 10)
+		return nil
 	case uint:
-		return strconv.FormatUint(uint64(v), 10), nil
+		*buf = strconv.AppendUint(*buf, uint64(v), 10)
+		return nil
 	case uint8:
-		return strconv.FormatUint(uint64(v), 10), nil
+		*buf = strconv.AppendUint(*buf, uint64(v), 10)
+		return nil
 	case uint16:
-		return strconv.FormatUint(uint64(v), 10), nil
+		*buf = strconv.AppendUint(*buf, uint64(v), 10)
+		return nil
 	case uint32:
-		return strconv.FormatUint(uint64(v), 10), nil
+		*buf = strconv.AppendUint(*buf, uint64(v), 10)
+		return nil
 	case uint64:
-		return strconv.FormatUint(v, 10), nil
+		*buf = strconv.AppendUint(*buf, v, 10)
+		return nil
 	case float32:
-		return strconv.FormatFloat(float64(v), 'f', -1, 32), nil
+		*buf = strconv.AppendFloat(*buf, float64(v), 'f', -1, 32)
+		return nil
 	case float64:
-		return strconv.FormatFloat(v, 'f', -1, 64), nil
+		*buf = strconv.AppendFloat(*buf, v, 'f', -1, 64)
+		return nil
 	case bool:
-		return strconv.FormatBool(v), nil
+		*buf = strconv.AppendBool(*buf, v)
+		return nil
 	case LogFormatter:
 		// LogFormatterインターフェースを実装している場合は、そのメソッドを呼び出す
-		return v.FormatForLog()
+		s, err := v.FormatForLog()
+		if err != nil {
+			return err
+		}
+		buf.WriteString(s)
+		return nil
 	}
 
 	// 構造体処理
@@ -335,7 +348,8 @@ func formatValue(v any) (string, error) {
 	// ポインタの場合はnilチェックして実体を取得
 	if rv.Kind() == reflect.Pointer {
 		if rv.IsNil() {
-			return "null", nil
+			buf.WriteString("null")
+			return nil
 		}
 		rv = rv.Elem()
 	}
@@ -344,17 +358,19 @@ func formatValue(v any) (string, error) {
 		// 通常の構造体をJSONに変換
 		b, err := json.Marshal(v)
 		if err != nil {
-			return "", err
+			return err
 		}
-		return string(b), nil
+		buf.Write(b)
+		return nil
 	}
 
 	// それ以外の型はJSONとしてマーシャル
 	b, err := json.Marshal(v)
 	if err != nil {
-		return "", err
+		return err
 	}
-	return string(b), nil
+	buf.Write(b)
+	return nil
 }
 
 // LogFormatter はログ出力のためのカスタムフォーマットを提供するインターフェース

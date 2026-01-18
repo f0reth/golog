@@ -241,10 +241,13 @@ func TestFormatValue(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := formatValue(tt.input)
+			buf := buffer.New()
+			defer buf.Free()
+			err := formatValue(buf, tt.input)
 			if (err != nil) != tt.hasError {
 				t.Errorf("expected error=%v, got error=%v", tt.hasError, err)
 			}
+			result := string(*buf)
 			if result != tt.expected {
 				t.Errorf("expected %q, got %q", tt.expected, result)
 			}
@@ -259,10 +262,13 @@ func TestNilPointer(t *testing.T) {
 	}
 
 	var nilPtr *TestStruct
-	result, err := formatValue(nilPtr)
+	formatBuf := buffer.New()
+	defer formatBuf.Free()
+	err := formatValue(formatBuf, nilPtr)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
+	result := string(*formatBuf)
 	if result != "null" {
 		t.Errorf("expected \"null\", got %q", result)
 	}
@@ -947,10 +953,13 @@ func TestVariousNumericTypes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := formatValue(tt.value)
+			buf := buffer.New()
+			defer buf.Free()
+			err := formatValue(buf, tt.value)
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
+			result := string(*buf)
 			if result != tt.expected {
 				t.Errorf("expected %q, got %q", tt.expected, result)
 			}
