@@ -1792,3 +1792,132 @@ func TestKeyEscaping(t *testing.T) {
 		}
 	})
 }
+
+// TestWithGroupEmptyName は空文字列のグループ名が無視されることをテストします
+func TestWithGroupEmptyName(t *testing.T) {
+	t.Run("single empty group name", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+		})
+
+		// 空文字列のグループは無視されるべき
+		h := handler.WithGroup("")
+		logger := slog.New(h)
+		logger.Info("test", "key", "value")
+
+		output := buf.String()
+		// グループプレフィックスが付いていないことを確認
+		if !strings.Contains(output, `key="value"`) {
+			t.Errorf("output should contain key without group prefix, got: %s", output)
+		}
+		// ドットがないことを確認（グループが追加されていない）
+		if strings.Contains(output, ".key") {
+			t.Errorf("output should not contain group prefix, got: %s", output)
+		}
+	})
+
+	t.Run("empty group between non-empty groups", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+		})
+
+		// group1 -> "" -> group2 のチェーン
+		h := handler.WithGroup("group1").WithGroup("").WithGroup("group2")
+		logger := slog.New(h)
+		logger.Info("test", "key", "value")
+
+		output := buf.String()
+		// 空のグループは無視され、group1.group2 のみが適用される
+		if !strings.Contains(output, `group1.group2.key="value"`) {
+			t.Errorf("output should contain group1.group2.key, got: %s", output)
+		}
+	})
+
+	t.Run("multiple empty groups", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+		})
+
+		// 複数の空文字列グループはすべて無視される
+		h := handler.WithGroup("").WithGroup("").WithGroup("")
+		logger := slog.New(h)
+		logger.Info("test", "key", "value")
+
+		output := buf.String()
+		// グループプレフィックスが付いていないことを確認
+		if !strings.Contains(output, `key="value"`) {
+			t.Errorf("output should contain key without group prefix, got: %s", output)
+		}
+		if strings.Contains(output, ".key") {
+			t.Errorf("output should not contain any group prefix, got: %s", output)
+		}
+	})
+
+	t.Run("empty group with WithAttrs", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+		})
+
+		// 空のグループ + WithAttrs
+		h := handler.WithGroup("group1").WithGroup("").WithAttrs([]slog.Attr{slog.String("attr1", "val1")})
+		logger := slog.New(h)
+		logger.Info("test", "key", "value")
+
+		output := buf.String()
+		// WithAttrsの属性はgroup1のみが適用される
+		if !strings.Contains(output, `group1.attr1="val1"`) {
+			t.Errorf("output should contain group1.attr1, got: %s", output)
+		}
+		// レコードの属性もgroup1のみが適用される
+		if !strings.Contains(output, `group1.key="value"`) {
+			t.Errorf("output should contain group1.key, got: %s", output)
+		}
+	})
+
+	t.Run("handler returned from empty WithGroup is same instance", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+		})
+
+		// 空文字列のWithGroupは同じハンドラインスタンスを返すべき
+		h := handler.WithGroup("")
+		if h != handler {
+			t.Error("WithGroup(\"\") should return the same handler instance")
+		}
+	})
+
+	t.Run("empty group name does not affect preformatted attrs", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+		})
+
+		// WithAttrs -> 空のWithGroup -> さらにWithAttrs
+		h1 := handler.WithAttrs([]slog.Attr{slog.String("first", "1")})
+		h2 := h1.WithGroup("")
+		h3 := h2.WithAttrs([]slog.Attr{slog.String("second", "2")})
+
+		logger := slog.New(h3)
+		logger.Info("test")
+
+		output := buf.String()
+		// 両方の属性が正しく出力されることを確認
+		if !strings.Contains(output, `first="1"`) {
+			t.Errorf("output should contain first attribute, got: %s", output)
+		}
+		if !strings.Contains(output, `second="2"`) {
+			t.Errorf("output should contain second attribute, got: %s", output)
+		}
+	})
+}

@@ -402,6 +402,11 @@ func (h *Handler) WithAttrs(attrs []slog.Attr) slog.Handler {
 
 // WithGroup は新しいグループを持つハンドラーを返します
 func (h *Handler) WithGroup(name string) slog.Handler {
+	// 空文字列が渡された場合は無視（slog仕様に準拠）
+	if name == "" {
+		return h
+	}
+
 	newHandler := *h // 既存のハンドラの値をコピー
 
 	// preformattedAttrs をコピー
