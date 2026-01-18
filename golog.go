@@ -437,29 +437,14 @@ func formatValue(buf *buffer.Buffer, v any) error {
 		return nil
 	}
 
-	// 構造体処理
+	// ポインタの場合はnilチェック
 	rv := reflect.ValueOf(v)
-
-	// ポインタの場合はnilチェックして実体を取得
-	if rv.Kind() == reflect.Pointer {
-		if rv.IsNil() {
-			buf.WriteString("null")
-			return nil
-		}
-		rv = rv.Elem()
-	}
-
-	if rv.Kind() == reflect.Struct {
-		// 通常の構造体をJSONに変換
-		b, err := json.Marshal(v)
-		if err != nil {
-			return err
-		}
-		buf.Write(b)
+	if rv.Kind() == reflect.Pointer && rv.IsNil() {
+		buf.WriteString("null")
 		return nil
 	}
 
-	// それ以外の型はJSONとしてマーシャル
+	// それ以外の型（構造体、スライス、マップなど）はJSONとしてマーシャル
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
