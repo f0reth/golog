@@ -1240,3 +1240,89 @@ func TestPreformattedAttrsWithMultipleWithAttrs(t *testing.T) {
 		t.Errorf("output should contain c=3, got: %s", output)
 	}
 }
+
+// TestAddSource はAddSourceオプションがソースファイルと行番号を追加することをテストします
+func TestAddSource(t *testing.T) {
+	t.Run("AddSource disabled", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+			AddSource: false,
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test message")
+
+		output := buf.String()
+		if strings.Contains(output, "source=") {
+			t.Errorf("output should not contain source when AddSource is false, got: %s", output)
+		}
+	})
+
+	t.Run("AddSource enabled", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+			AddSource: true,
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test message")
+
+		output := buf.String()
+		if !strings.Contains(output, "source=") {
+			t.Errorf("output should contain source when AddSource is true, got: %s", output)
+		}
+
+		// ソース情報にファイル名と行番号が含まれているか確認
+		if !strings.Contains(output, "golog_test.go:") {
+			t.Errorf("output should contain source file name and line number, got: %s", output)
+		}
+	})
+
+	t.Run("AddSource with WithAttrs", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+			AddSource: true,
+		})
+
+		// WithAttrsでaddSourceが保持されることを確認
+		h := handler.WithAttrs([]slog.Attr{slog.String("key", "value")})
+		logger := slog.New(h)
+		logger.Info("test message")
+
+		output := buf.String()
+		if !strings.Contains(output, "source=") {
+			t.Errorf("output should contain source when AddSource is true with WithAttrs, got: %s", output)
+		}
+		if !strings.Contains(output, `key="value"`) {
+			t.Errorf("output should contain the attribute, got: %s", output)
+		}
+	})
+
+	t.Run("AddSource with WithGroup", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+			AddSource: true,
+		})
+
+		// WithGroupでaddSourceが保持されることを確認
+		h := handler.WithGroup("group1")
+		logger := slog.New(h)
+		logger.Info("test message", "key", "value")
+
+		output := buf.String()
+		if !strings.Contains(output, "source=") {
+			t.Errorf("output should contain source when AddSource is true with WithGroup, got: %s", output)
+		}
+		if !strings.Contains(output, `group1.key="value"`) {
+			t.Errorf("output should contain the grouped attribute, got: %s", output)
+		}
+	})
+}

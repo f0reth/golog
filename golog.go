@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +33,7 @@ type Handler struct {
 	attrs             []slog.Attr
 	groups            []string
 	useColors         bool        // 色を使用するかどうかのフラグ
+	addSource         bool        // ソースファイルと行番号を追加するかどうか
 	mu                *sync.Mutex // スレッドセーフな書き込みのためのミューテックス
 	preformattedAttrs []byte      // 事前フォーマット済みの属性（パフォーマンス最適化）
 }
@@ -40,12 +43,14 @@ type Options struct {
 	Level      slog.Leveler
 	UseColors  bool
 	TimeFormat string // 時刻フォーマット（空の場合は "2006-01-02 15:04:05.000" を使用）
+	AddSource  bool   // ソースファイルと行番号を追加するかどうか
 }
 
 // NewHandler は新しいカスタムハンドラーを作成します
 func NewHandler(w io.Writer, opts *Options) *Handler {
 	var level slog.Level
 	useColors := false
+	addSource := false
 	timeFormat := "2006-01-02 15:04:05.000" // デフォルト: ミリ秒までのフォーマット
 
 	if opts != nil {
@@ -53,6 +58,7 @@ func NewHandler(w io.Writer, opts *Options) *Handler {
 			level = opts.Level.Level()
 		}
 		useColors = opts.UseColors
+		addSource = opts.AddSource
 		if opts.TimeFormat != "" {
 			timeFormat = opts.TimeFormat
 		}
@@ -65,6 +71,7 @@ func NewHandler(w io.Writer, opts *Options) *Handler {
 		attrs:      []slog.Attr{},
 		groups:     []string{},
 		useColors:  useColors,
+		addSource:  addSource,
 		mu:         &sync.Mutex{},
 	}
 }
@@ -106,6 +113,20 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	// 事前フォーマット済みの属性を追加
 	if len(h.preformattedAttrs) > 0 {
 		buf.Write(h.preformattedAttrs)
+	}
+
+	// ソース情報を追加
+	if h.addSource {
+		fs := runtime.CallersFrames([]uintptr{r.PC})
+		f, _ := fs.Next()
+		if f.File != "" {
+			// ファイル名のみを取得（フルパスではなく）
+			file := filepath.Base(f.File)
+			// "file.go:42" 形式でフォーマット
+			sourceStr := file + ":" + strconv.Itoa(f.Line)
+			buf.WriteString(" source=")
+			buf.WriteString(strconv.Quote(sourceStr))
+		}
 	}
 
 	// レコードの属性を追加
