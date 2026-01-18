@@ -162,7 +162,12 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 			// ソースが無視されていない場合は出力
 			if sourceAttr.Key != "" {
 				buf.WriteString(" ")
-				buf.WriteString(sourceAttr.Key)
+				// キーをエスケープ（必要な場合）
+				if needsQuoting(sourceAttr.Key) {
+					buf.WriteString(strconv.Quote(sourceAttr.Key))
+				} else {
+					buf.WriteString(sourceAttr.Key)
+				}
 				buf.WriteString("=")
 				formattedSource, _ := formatValue(sourceAttr.Value.Any())
 				buf.WriteString(formattedSource)
@@ -185,6 +190,20 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	return err
 }
 
+// needsQuoting はキーにクォートが必要かどうかを判定します
+func needsQuoting(s string) bool {
+	if s == "" {
+		return true
+	}
+	for _, r := range s {
+		// スペース、制御文字、=、"、DEL文字のいずれかが含まれる場合はクォートが必要
+		if r <= ' ' || r == '=' || r == '"' || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
 func appendAttr(buf *buffer.Buffer, key string, value slog.Value, groups []string, replaceAttr func(groups []string, a slog.Attr) slog.Attr) {
 	// ReplaceAttr コールバックが設定されている場合は適用
 	attr := slog.Attr{Key: key, Value: value}
@@ -201,12 +220,22 @@ func appendAttr(buf *buffer.Buffer, key string, value slog.Value, groups []strin
 	// グループプレフィックスを付ける
 	if len(groups) > 0 {
 		for _, group := range groups {
-			buf.WriteString(group)
+			// グループ名もエスケープが必要な場合はクォート
+			if needsQuoting(group) {
+				buf.WriteString(strconv.Quote(group))
+			} else {
+				buf.WriteString(group)
+			}
 			buf.WriteByte('.')
 		}
 	}
 
-	buf.WriteString(attr.Key)
+	// キーをエスケープ（必要な場合）
+	if needsQuoting(attr.Key) {
+		buf.WriteString(strconv.Quote(attr.Key))
+	} else {
+		buf.WriteString(attr.Key)
+	}
 	buf.WriteByte('=')
 	// formatValueは slog.Value.Any() を受け取るので、value.Any() を渡す
 	jsonStr, err := formatValue(attr.Value.Any())

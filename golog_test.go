@@ -1607,3 +1607,188 @@ func TestReplaceAttr(t *testing.T) {
 		}
 	})
 }
+
+// TestKeyEscaping はキーのエスケープ処理をテストします
+func TestKeyEscaping(t *testing.T) {
+	t.Run("key with space", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test", "my key", "value")
+
+		output := buf.String()
+		// キーにスペースが含まれる場合はクォートされる
+		if !strings.Contains(output, `"my key"="value"`) {
+			t.Errorf("output should contain quoted key with space, got: %s", output)
+		}
+	})
+
+	t.Run("key with double quote", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test", `key"name`, "value")
+
+		output := buf.String()
+		// キーにダブルクォートが含まれる場合はエスケープされる
+		if !strings.Contains(output, `"key\"name"="value"`) {
+			t.Errorf("output should contain escaped key with quote, got: %s", output)
+		}
+	})
+
+	t.Run("key with equals sign", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test", "key=name", "value")
+
+		output := buf.String()
+		// キーにイコールが含まれる場合はクォートされる
+		if !strings.Contains(output, `"key=name"="value"`) {
+			t.Errorf("output should contain quoted key with equals, got: %s", output)
+		}
+	})
+
+	t.Run("normal key (no escaping)", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test", "normalKey", "value")
+
+		output := buf.String()
+		// 通常のキーはクォートされない
+		if !strings.Contains(output, `normalKey="value"`) {
+			t.Errorf("output should contain unquoted normal key, got: %s", output)
+		}
+		// ダブルクォートで囲まれていないことを確認
+		if strings.Contains(output, `"normalKey"="value"`) {
+			t.Errorf("normal key should not be quoted, got: %s", output)
+		}
+	})
+
+	t.Run("group name with space", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+		})
+
+		logger := slog.New(handler.WithGroup("my group"))
+		logger.Info("test", "key", "value")
+
+		output := buf.String()
+		// グループ名にスペースが含まれる場合はクォートされる
+		if !strings.Contains(output, `"my group".key="value"`) {
+			t.Errorf("output should contain quoted group name with space, got: %s", output)
+		}
+	})
+
+	t.Run("nested groups with special characters", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+		})
+
+		h := handler.WithGroup("group1").WithGroup("group 2").WithGroup("group=3")
+		logger := slog.New(h)
+		logger.Info("test", "key", "value")
+
+		output := buf.String()
+		// 特殊文字を含むグループ名がすべてクォートされる
+		if !strings.Contains(output, `group1."group 2"."group=3".key="value"`) {
+			t.Errorf("output should contain quoted group names with special chars, got: %s", output)
+		}
+	})
+
+	t.Run("key with newline", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test", "key\nname", "value")
+
+		output := buf.String()
+		// キーに改行が含まれる場合はエスケープされる
+		if !strings.Contains(output, `"key\nname"="value"`) {
+			t.Errorf("output should contain escaped key with newline, got: %s", output)
+		}
+	})
+
+	t.Run("key with tab", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test", "key\tname", "value")
+
+		output := buf.String()
+		// キーにタブが含まれる場合はエスケープされる
+		if !strings.Contains(output, `"key\tname"="value"`) {
+			t.Errorf("output should contain escaped key with tab, got: %s", output)
+		}
+	})
+
+	t.Run("empty key", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test", "", "value")
+
+		output := buf.String()
+		// 空のキーもクォートされる
+		if !strings.Contains(output, `""="value"`) {
+			t.Errorf("output should contain quoted empty key, got: %s", output)
+		}
+	})
+
+	t.Run("ReplaceAttr with special key characters", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:     slog.LevelInfo,
+			UseColors: false,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				// キーにスペースを含む名前に変更
+				if a.Key == "user" {
+					return slog.Attr{Key: "user name", Value: a.Value}
+				}
+				return a
+			},
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test", "user", "alice")
+
+		output := buf.String()
+		// ReplaceAttrで変更されたキーもエスケープされる
+		if !strings.Contains(output, `"user name"="alice"`) {
+			t.Errorf("output should contain escaped renamed key, got: %s", output)
+		}
+	})
+}
