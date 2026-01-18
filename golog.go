@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/f0reth/golog/internal/buffer"
 )
@@ -25,11 +26,92 @@ const (
 	colorWhite  = "\033[37m"
 )
 
+// 一般的なタイムフォーマット定数
+const (
+	defaultTimeFormat = "2006-01-02 15:04:05.000"
+)
+
+// timeFormatterFunc は時刻をバッファにフォーマットする関数型
+type timeFormatterFunc func(*buffer.Buffer, time.Time)
+
+// formatTimeDefault はデフォルトフォーマット "2006-01-02 15:04:05.000" 用の最適化された関数
+func formatTimeDefault(buf *buffer.Buffer, t time.Time) {
+	year, month, day := t.Date()
+	hour, min, sec := t.Clock()
+	nsec := t.Nanosecond()
+
+	// "2006-01-02 15:04:05.000" を直接構築
+	*buf = strconv.AppendInt(*buf, int64(year), 10)
+	buf.WriteByte('-')
+	if month < 10 {
+		buf.WriteByte('0')
+	}
+	*buf = strconv.AppendInt(*buf, int64(month), 10)
+	buf.WriteByte('-')
+	if day < 10 {
+		buf.WriteByte('0')
+	}
+	*buf = strconv.AppendInt(*buf, int64(day), 10)
+	buf.WriteByte(' ')
+	if hour < 10 {
+		buf.WriteByte('0')
+	}
+	*buf = strconv.AppendInt(*buf, int64(hour), 10)
+	buf.WriteByte(':')
+	if min < 10 {
+		buf.WriteByte('0')
+	}
+	*buf = strconv.AppendInt(*buf, int64(min), 10)
+	buf.WriteByte(':')
+	if sec < 10 {
+		buf.WriteByte('0')
+	}
+	*buf = strconv.AppendInt(*buf, int64(sec), 10)
+	buf.WriteByte('.')
+	// ミリ秒部分（3桁）
+	ms := nsec / 1000000
+	if ms < 100 {
+		buf.WriteByte('0')
+		if ms < 10 {
+			buf.WriteByte('0')
+		}
+	}
+	*buf = strconv.AppendInt(*buf, int64(ms), 10)
+}
+
+// formatTimeRFC3339 はRFC3339フォーマット用の最適化された関数
+func formatTimeRFC3339(buf *buffer.Buffer, t time.Time) {
+	*buf = t.AppendFormat(*buf, time.RFC3339)
+}
+
+// formatTimeRFC3339Nano はRFC3339Nanoフォーマット用の最適化された関数
+func formatTimeRFC3339Nano(buf *buffer.Buffer, t time.Time) {
+	*buf = t.AppendFormat(*buf, time.RFC3339Nano)
+}
+
+// makeTimeFormatter は指定されたフォーマット文字列に応じた最適な formatter を返す
+func makeTimeFormatter(format string) timeFormatterFunc {
+	switch format {
+	case defaultTimeFormat:
+		return formatTimeDefault
+	case time.RFC3339:
+		return formatTimeRFC3339
+	case time.RFC3339Nano:
+		return formatTimeRFC3339Nano
+	default:
+		// カスタムフォーマットの場合は汎用関数を返す
+		return func(buf *buffer.Buffer, t time.Time) {
+			*buf = t.AppendFormat(*buf, format)
+		}
+	}
+}
+
 // Handler は指定されたフォーマットでログを出力するハンドラー
 type Handler struct {
 	out               io.Writer
 	minLevel          slog.Level
 	timeFormat        string
+	timeFormatter     timeFormatterFunc                           // 最適化された時刻フォーマット関数
 	attrs             []slog.Attr
 	groups            []string
 	useColors         bool                                        // 色を使用するかどうかのフラグ
@@ -69,15 +151,16 @@ func NewHandler(w io.Writer, opts *Options) *Handler {
 	}
 
 	return &Handler{
-		out:         w,
-		minLevel:    level,
-		timeFormat:  timeFormat,
-		attrs:       []slog.Attr{},
-		groups:      []string{},
-		useColors:   useColors,
-		addSource:   addSource,
-		replaceAttr: replaceAttr,
-		mu:          &sync.Mutex{},
+		out:           w,
+		minLevel:      level,
+		timeFormat:    timeFormat,
+		timeFormatter: makeTimeFormatter(timeFormat),
+		attrs:         []slog.Attr{},
+		groups:        []string{},
+		useColors:     useColors,
+		addSource:     addSource,
+		replaceAttr:   replaceAttr,
+		mu:            &sync.Mutex{},
 	}
 }
 
@@ -104,7 +187,7 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	// 時刻が無視されていない場合は出力
 	if timeAttr.Key != "" {
 		buf.WriteByte('[')
-		*buf = r.Time.AppendFormat(*buf, h.timeFormat)
+		h.timeFormatter(buf, r.Time)
 		buf.WriteString("] ")
 	}
 

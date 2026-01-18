@@ -1930,3 +1930,197 @@ func TestWithGroupEmptyName(t *testing.T) {
 		}
 	})
 }
+
+// TestTimeFormatterOptimization は時刻フォーマットの最適化をテストします
+func TestTimeFormatterOptimization(t *testing.T) {
+	testTime := time.Date(2024, 1, 15, 10, 30, 45, 123456789, time.UTC)
+
+	t.Run("default format", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:      slog.LevelInfo,
+			UseColors:  false,
+			TimeFormat: "2006-01-02 15:04:05.000",
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test")
+
+		output := buf.String()
+		// デフォルトフォーマットのパターンを検証（例: [2026-01-18 14:37:12.831]）
+		// 時刻部分は動的なので、フォーマットが正しいかのみ検証
+		if !strings.Contains(output, " ") || !strings.Contains(output, ":") || !strings.Contains(output, ".") {
+			t.Errorf("output should contain formatted time with date, time, and milliseconds, got: %s", output)
+		}
+		// 括弧で囲まれていることを確認
+		if !strings.Contains(output, "[") || !strings.Contains(output, "]") {
+			t.Errorf("output should have time in brackets, got: %s", output)
+		}
+	})
+
+	t.Run("RFC3339 format", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:      slog.LevelInfo,
+			UseColors:  false,
+			TimeFormat: time.RFC3339,
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test")
+
+		output := buf.String()
+		// RFC3339フォーマットが含まれていることを確認（例: 2024-01-15T10:30:45Z or +09:00）
+		if !strings.Contains(output, "T") {
+			t.Errorf("output should contain RFC3339 formatted time with 'T', got: %s", output)
+		}
+	})
+
+	t.Run("RFC3339Nano format", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:      slog.LevelInfo,
+			UseColors:  false,
+			TimeFormat: time.RFC3339Nano,
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test")
+
+		output := buf.String()
+		// RFC3339Nanoフォーマットが含まれていることを確認
+		if !strings.Contains(output, "T") || !strings.Contains(output, ".") {
+			t.Errorf("output should contain RFC3339Nano formatted time, got: %s", output)
+		}
+	})
+
+	t.Run("custom format", func(t *testing.T) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:      slog.LevelInfo,
+			UseColors:  false,
+			TimeFormat: "2006/01/02",
+		})
+
+		logger := slog.New(handler)
+		logger.Info("test")
+
+		output := buf.String()
+		// カスタムフォーマットが正しく適用されることを確認
+		if !strings.Contains(output, "/01/") {
+			t.Errorf("output should contain custom formatted time, got: %s", output)
+		}
+	})
+
+	t.Run("formatTimeDefault produces correct output", func(t *testing.T) {
+		buf := buffer.New()
+		defer buf.Free()
+
+		formatTimeDefault(buf, testTime)
+		result := string(*buf)
+
+		expected := "2024-01-15 10:30:45.123"
+		if result != expected {
+			t.Errorf("expected %q, got %q", expected, result)
+		}
+	})
+
+	t.Run("formatTimeRFC3339 produces correct output", func(t *testing.T) {
+		buf := buffer.New()
+		defer buf.Free()
+
+		formatTimeRFC3339(buf, testTime)
+		result := string(*buf)
+
+		// RFC3339フォーマットを検証
+		if !strings.HasPrefix(result, "2024-01-15T10:30:45") {
+			t.Errorf("expected RFC3339 format, got %q", result)
+		}
+	})
+
+	t.Run("makeTimeFormatter returns correct formatter", func(t *testing.T) {
+		// デフォルトフォーマットの場合
+		formatter := makeTimeFormatter("2006-01-02 15:04:05.000")
+		buf := buffer.New()
+		defer buf.Free()
+		formatter(buf, testTime)
+		if string(*buf) != "2024-01-15 10:30:45.123" {
+			t.Errorf("default formatter produced incorrect output: %s", string(*buf))
+		}
+
+		// カスタムフォーマットの場合
+		buf2 := buffer.New()
+		defer buf2.Free()
+		formatter2 := makeTimeFormatter("15:04:05")
+		formatter2(buf2, testTime)
+		if string(*buf2) != "10:30:45" {
+			t.Errorf("custom formatter produced incorrect output: %s", string(*buf2))
+		}
+	})
+}
+
+// BenchmarkTimeFormatting はさまざまな時刻フォーマット方法のパフォーマンスを測定します
+func BenchmarkTimeFormatting(b *testing.B) {
+	testTime := time.Now()
+
+	b.Run("DefaultFormatOptimized", func(b *testing.B) {
+		buf := buffer.New()
+		defer buf.Free()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			*buf = (*buf)[:0]
+			formatTimeDefault(buf, testTime)
+		}
+	})
+
+	b.Run("DefaultFormatAppendFormat", func(b *testing.B) {
+		buf := buffer.New()
+		defer buf.Free()
+		format := "2006-01-02 15:04:05.000"
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			*buf = (*buf)[:0]
+			*buf = testTime.AppendFormat(*buf, format)
+		}
+	})
+
+	b.Run("RFC3339Optimized", func(b *testing.B) {
+		buf := buffer.New()
+		defer buf.Free()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			*buf = (*buf)[:0]
+			formatTimeRFC3339(buf, testTime)
+		}
+	})
+
+	b.Run("CompleteLogWithDefaultFormat", func(b *testing.B) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:      slog.LevelInfo,
+			UseColors:  false,
+			TimeFormat: "2006-01-02 15:04:05.000",
+		})
+		logger := slog.New(handler)
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			buf.Reset()
+			logger.Info("test message", "key", "value")
+		}
+	})
+
+	b.Run("CompleteLogWithCustomFormat", func(b *testing.B) {
+		var buf bytes.Buffer
+		handler := NewHandler(&buf, &Options{
+			Level:      slog.LevelInfo,
+			UseColors:  false,
+			TimeFormat: "2006/01/02 15:04",
+		})
+		logger := slog.New(handler)
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			buf.Reset()
+			logger.Info("test message", "key", "value")
+		}
+	})
+}
